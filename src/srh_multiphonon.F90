@@ -2,10 +2,10 @@
 !! libNEGF: a general library for Non-Equilibrium Greens functions.         !
 !! Copyright (C) 2012 - 2026                                                !
 !!                                                                          !
-!! SRH multiphonon defect interaction (Stage 6).                            !
+!! SRH multiphonon defect interaction (Stage 7).                            !
 !! Physically inelastic (Aeberhard 2019): TInelastic + energy-indexed       !
-!! Sigma cache. Stage 6: multiphonon ladder M(l)=e^{-S} S^l/l! with energy !
-!! shifts +/- l*hbar*omega, local at (pl,orb). Full defect GF later.       !
+!! Sigma cache. Stage 6: multiphonon ladder. Stage 7: defect occupation fd  !
+!! and net rate diagnostic from continuum G at (pl,orb). Full Gd later.    !
 !!--------------------------------------------------------------------------!
 
 module srh_multiphonon
@@ -41,6 +41,8 @@ module srh_multiphonon
     integer :: orb_index = 0
     real(dp) :: fd = 0.5_dp
     real(dp) :: r_net = 0.0_dp
+    real(dp) :: n_loc = 0.0_dp
+    real(dp) :: n1 = 0.0_dp
     real(dp) :: V2 = 0.0_dp
     real(dp) :: S_hr = S_DEFAULT
     integer  :: l_max = LMAX_DEFAULT
@@ -65,6 +67,7 @@ module srh_multiphonon
     procedure :: destroy_Sigma_n
     procedure :: destroy
     procedure :: set_EnGrid
+    procedure :: update_occupation
 
   end type TSrhMultiphonon
 
@@ -85,7 +88,7 @@ contains
     real(dp) :: gamma_eV, x, fact
     integer :: l
 
-    this%descriptor = "SRH multiphonon defect (Stage 6 ladder)"
+    this%descriptor = "SRH multiphonon defect (Stage 7 fd diagnostic)"
     this%struct = struct
     this%Ed0 = Ed0
     this%rho_d = rho_d
@@ -97,6 +100,8 @@ contains
     this%scba_niter = niter
     this%fd = 0.5_dp
     this%r_net = 0.0_dp
+    this%n_loc = 0.0_dp
+    this%n1 = 0.0_dp
 
     this%wq = WQ_DEFAULT
     this%S_hr = S_DEFAULT
@@ -529,7 +534,107 @@ contains
       end do
     end do
 
+    call this%update_occupation()
+
   end subroutine compute_Sigma_n
+
+  !> Stage 7: continuum-based defect occupation and net rate diagnostic.
+  !! Stage-1 / classical two-carrier form (Aeberhard bulk limit):
+  !!   n_loc from integral of local G^n at (pl,orb)  [NEGF-internal scale]
+  !!   n1,p1 from Ed0 relative to midgap; ni diagnostic default
+  !!   p_loc diagnostic: equal-injection proxy (= n_loc) until VB continuum is mapped
+  !!   fd = (Cn*n + Cp*p1) / (Cn*(n+n1) + Cp*(p+p1))
+  !!   r_net = (n*p - ni^2) / (tau_p*(n+n1) + tau_n*(p+p1))
+  !! Electron-only balance would force r_net=0 by construction; do not use that.
+  subroutine update_occupation(this)
+    class(TSrhMultiphonon) :: this
+
+    integer :: nE, nK, iE, iK, pl, orb
+    type(TMatLabel) :: label
+    type(z_dns), pointer :: pG
+    real(dp) :: dE, kT, ni, n_sum, pi
+    real(dp) :: n, p, n1, p1, tau_n, tau_p, denom, num
+
+    if (.not. site_ok(this)) return
+    if (.not. associated(this%G_n)) return
+
+    select type(pGcache => this%G_n)
+    type is (TMatrixCacheMem)
+      if (.not. pGcache%isInitialized) return
+      nE = size(pGcache%MatArray, 1)
+      nK = size(pGcache%MatArray, 2)
+    class default
+      return
+    end select
+
+    pl = this%pl_index
+    orb = this%orb_index
+    dE = this%dE
+    if (dE <= 0.0_dp) dE = 1.0_dp
+    pi = 3.14159265358979323846_dp
+
+    n_sum = 0.0_dp
+    label%spin = 1
+    label%row_block = pl
+    label%col_block = pl
+
+    do iK = 1, nK
+      do iE = 1, nE
+        label%kpoint = iK
+        label%energy_point = iE
+        if (.not. this%G_n%is_cached(label)) cycle
+        call this%G_n%retrieve_pointer(pG, label)
+        if (.not. associated(pG)) cycle
+        if (.not. allocated(pG%val)) cycle
+        if (orb > size(pG%val, 1)) cycle
+        n_sum = n_sum + max(-aimag(pG%val(orb, orb)), 0.0_dp) * dE / (2.0_dp * pi)
+      end do
+    end do
+
+    this%n_loc = n_sum / real(max(nK, 1), dp)
+    n = this%n_loc
+    ! Until VB continuum is available: equal-injection diagnostic proxy
+    p = this%n_loc
+
+    kT = KB_EV * max(this%temperature, 1.0_dp)
+    ! ni on NEGF-internal scale. Factor 0.1 → mild injection so r_net is not
+    ! identically zero (equal n=p=ni would force np=ni^2).
+    ni = max(0.1_dp * this%n_loc, 1.0e-30_dp)
+    n1 = ni * exp( this%Ed0 / kT)
+    p1 = ni * exp(-this%Ed0 / kT)
+    this%n1 = n1
+
+    if (this%Cn * this%rho_d > 0.0_dp) then
+      tau_n = 1.0_dp / (this%Cn * this%rho_d)
+    else
+      tau_n = 1.0e30_dp
+    end if
+    if (this%Cp * this%rho_d > 0.0_dp) then
+      tau_p = 1.0_dp / (this%Cp * this%rho_d)
+    else
+      tau_p = 1.0e30_dp
+    end if
+
+    denom = this%Cn * (n + n1) + this%Cp * (p + p1)
+    if (denom > 0.0_dp) then
+      this%fd = (this%Cn * n + this%Cp * p1) / denom
+    else
+      this%fd = 0.5_dp
+    end if
+
+    denom = tau_p * (n + n1) + tau_n * (p + p1)
+    num = n * p - ni * ni
+    if (denom > 0.0_dp) then
+      this%r_net = num / denom
+    else
+      this%r_net = 0.0_dp
+    end if
+
+    write(*,'(A,I3,A,ES12.4,A,F8.5,A,ES12.4)') &
+        & ' SRH diagnostic (scba_iter=', this%scba_iter, &
+        & '): n_loc=', this%n_loc, ' fd=', this%fd, ' r_net=', this%r_net
+
+  end subroutine update_occupation
 
   subroutine destroy_Sigma_r(this)
     class(TSrhMultiphonon) :: this
