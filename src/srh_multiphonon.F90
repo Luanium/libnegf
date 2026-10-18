@@ -2,10 +2,10 @@
 !! libNEGF: a general library for Non-Equilibrium Greens functions.         !
 !! Copyright (C) 2012 - 2026                                                !
 !!                                                                          !
-!! SRH multiphonon defect interaction (Stage 5).                            !
+!! SRH multiphonon defect interaction (Stage 6).                            !
 !! Physically inelastic (Aeberhard 2019): TInelastic + energy-indexed       !
-!! Sigma cache. Stage 5 uses a local diagonal coupling V2*G at the defect  !
-!! site only; full multiphonon ladder comes later.                          !
+!! Sigma cache. Stage 6: multiphonon ladder M(l)=e^{-S} S^l/l! with energy !
+!! shifts +/- l*hbar*omega, local at (pl,orb). Full defect GF later.       !
 !!--------------------------------------------------------------------------!
 
 module srh_multiphonon
@@ -25,6 +25,10 @@ module srh_multiphonon
   public :: TSrhMultiphonon_init
 
   real(dp), parameter :: HBAR_EV_S = 6.582119569e-16_dp
+  real(dp), parameter :: KB_EV = 8.617333262145e-5_dp
+  integer,  parameter :: LMAX_DEFAULT = 4
+  real(dp), parameter :: WQ_DEFAULT = 0.036_dp
+  real(dp), parameter :: S_DEFAULT  = 3.0_dp
 
   type, extends(TInelastic) :: TSrhMultiphonon
 
@@ -38,6 +42,12 @@ module srh_multiphonon
     real(dp) :: fd = 0.5_dp
     real(dp) :: r_net = 0.0_dp
     real(dp) :: V2 = 0.0_dp
+    real(dp) :: S_hr = S_DEFAULT
+    integer  :: l_max = LMAX_DEFAULT
+    real(dp) :: Nq = 0.0_dp
+    real(dp) :: dE = 0.0_dp
+    integer  :: iEshift = 0
+    real(dp), allocatable :: Ml(:)
 
   contains
 
@@ -54,6 +64,7 @@ module srh_multiphonon
     procedure :: destroy_Sigma_r
     procedure :: destroy_Sigma_n
     procedure :: destroy
+    procedure :: set_EnGrid
 
   end type TSrhMultiphonon
 
@@ -71,9 +82,10 @@ contains
     real(dp), intent(in) :: Ed0, rho_d, Cn, Cp, temperature
     integer, intent(in) :: pl_index, orb_index, niter
 
-    real(dp) :: gamma_eV
+    real(dp) :: gamma_eV, x, fact
+    integer :: l
 
-    this%descriptor = "SRH multiphonon defect interaction (inelastic local Sigma)"
+    this%descriptor = "SRH multiphonon defect (Stage 6 ladder)"
     this%struct = struct
     this%Ed0 = Ed0
     this%rho_d = rho_d
@@ -83,14 +95,33 @@ contains
     this%pl_index = pl_index
     this%orb_index = orb_index
     this%scba_niter = niter
-    this%wq = 0.0_dp
     this%fd = 0.5_dp
     this%r_net = 0.0_dp
 
-    ! Stage-5 test scale: physical C*rho is ~1e-9 eV and invisible on device currents.
-    ! Use a large fixed Gamma so SCBA error / currents must change if Sigma is applied.
+    this%wq = WQ_DEFAULT
+    this%S_hr = S_DEFAULT
+    this%l_max = LMAX_DEFAULT
+
+    x = this%wq / (KB_EV * max(temperature, 1.0_dp))
+    if (x > 50.0_dp) then
+      this%Nq = 0.0_dp
+    else
+      this%Nq = 1.0_dp / (exp(x) - 1.0_dp)
+    end if
+
+    if (allocated(this%Ml)) deallocate(this%Ml)
+    allocate(this%Ml(0:this%l_max))
+    fact = 1.0_dp
+    this%Ml(0) = exp(-this%S_hr)
+    do l = 1, this%l_max
+      fact = fact * real(l, dp)
+      this%Ml(l) = exp(-this%S_hr) * (this%S_hr ** l) / fact
+    end do
+
+    ! Mild test floor: large enough for a visible SCBA signal, small enough
+    ! not to dominate the whole device current (0.1 eV was far too strong).
     gamma_eV = HBAR_EV_S * max(Cn, Cp) * max(rho_d, 0.0_dp)
-    if (gamma_eV < 0.1_dp) gamma_eV = 0.1_dp
+    if (gamma_eV < 5.0e-3_dp) gamma_eV = 5.0e-3_dp
     this%V2 = gamma_eV * gamma_eV
 
     if (.not. associated(this%sigma_r)) then
@@ -101,6 +132,17 @@ contains
     end if
 
   end subroutine TSrhMultiphonon_init
+
+  subroutine set_EnGrid(this, dE)
+    class(TSrhMultiphonon), intent(inout) :: this
+    real(dp), intent(in) :: dE
+    this%dE = abs(dE)
+    if (this%dE > 0.0_dp) then
+      this%iEshift = max(1, nint(this%wq / this%dE))
+    else
+      this%iEshift = 0
+    end if
+  end subroutine set_EnGrid
 
   logical function site_ok(this)
     class(TSrhMultiphonon), intent(in) :: this
@@ -116,8 +158,6 @@ contains
     if (this%orb_index > nrow) return
     site_ok = .true.
   end function site_ok
-
-  ! ---- add Sigma from energy cache (inelastic path) ---------------------
 
   subroutine add_sigma_r_sp(this, esh, en_index, k_index, spin)
     class(TSrhMultiphonon) :: this
@@ -271,7 +311,6 @@ contains
 
   end subroutine get_sigma_n_mat
 
-  ! inelastic: Gr is cached via set_Gr_pointer, not passed here
   subroutine set_Gr(this, Gr, en_index, k_index, spin)
     class(TSrhMultiphonon) :: this
     type(z_dns), dimension(:,:), intent(in) :: Gr
@@ -284,21 +323,22 @@ contains
     integer, intent(in), optional :: en_index, k_index, spin
   end subroutine set_Gn
 
-  ! ---- build Sigma from cached G (called after energy loop) --------------
-
   subroutine compute_Sigma_r(this, en_index, k_index, spin)
     class(TSrhMultiphonon) :: this
     integer, intent(in), optional :: en_index, k_index, spin
 
-    integer :: nE, nK, nbl, pl, orb, nrow, iE, iK, pl_start, pl_end
-    type(TMatLabel) :: label
+    integer :: nE, nK, nbl, pl, orb, nrow, iE, iK, pl_start, pl_end, l, iEp, iEm
+    type(TMatLabel) :: label, labelp
     type(z_dns), pointer :: pG
     type(z_dns) :: sig
+    complex(dp) :: acc
+    real(dp) :: fac_em, fac_abs, wgt
 
     if (.not. site_ok(this)) return
     if (this%V2 <= 0.0_dp) return
     if (.not. associated(this%G_r)) return
     if (.not. associated(this%sigma_r)) return
+    if (.not. allocated(this%Ml)) return
 
     select type(pGcache => this%G_r)
     type is (TMatrixCacheMem)
@@ -323,23 +363,63 @@ contains
       end if
     end select
 
+    fac_em  = this%Nq + 1.0_dp
+    fac_abs = this%Nq
+
     label%spin = 1
     label%row_block = pl
     label%col_block = pl
+    labelp = label
 
     do iK = 1, nK
       do iE = 1, nE
         label%kpoint = iK
         label%energy_point = iE
-        if (.not. this%G_r%is_cached(label)) cycle
-        call this%G_r%retrieve_pointer(pG, label)
-        if (.not. associated(pG)) cycle
-        if (.not. allocated(pG%val)) cycle
-        if (orb > size(pG%val, 1)) cycle
+        acc = (0.0_dp, 0.0_dp)
+
+        do l = 0, this%l_max
+          wgt = this%Ml(l)
+          if (wgt <= 0.0_dp) cycle
+
+          iEm = iE - l * this%iEshift
+          if (iEm >= 1 .and. iEm <= nE) then
+            labelp%kpoint = iK
+            labelp%energy_point = iEm
+            if (this%G_r%is_cached(labelp)) then
+              call this%G_r%retrieve_pointer(pG, labelp)
+              if (associated(pG)) then
+                if (allocated(pG%val)) then
+                  if (orb <= size(pG%val, 1)) then
+                    acc = acc + wgt * fac_em * pG%val(orb, orb)
+                  end if
+                end if
+              end if
+            end if
+          end if
+
+          if (l == 0) cycle
+          iEp = iE + l * this%iEshift
+          if (iEp >= 1 .and. iEp <= nE) then
+            labelp%kpoint = iK
+            labelp%energy_point = iEp
+            if (this%G_r%is_cached(labelp)) then
+              call this%G_r%retrieve_pointer(pG, labelp)
+              if (associated(pG)) then
+                if (allocated(pG%val)) then
+                  if (orb <= size(pG%val, 1)) then
+                    acc = acc + wgt * fac_abs * pG%val(orb, orb)
+                  end if
+                end if
+              end if
+            end if
+          end if
+        end do
+
+        if (acc == (0.0_dp, 0.0_dp)) cycle
 
         call create(sig, nrow, nrow)
         sig%val = (0.0_dp, 0.0_dp)
-        sig%val(orb, orb) = this%V2 * pG%val(orb, orb)
+        sig%val(orb, orb) = this%V2 * acc
         call this%sigma_r%add(sig, label)
         call mat_destroy(sig)
       end do
@@ -351,15 +431,18 @@ contains
     class(TSrhMultiphonon) :: this
     integer, intent(in), optional :: en_index, k_index, spin
 
-    integer :: nE, nK, nbl, pl, orb, nrow, iE, iK, pl_start, pl_end
-    type(TMatLabel) :: label
+    integer :: nE, nK, nbl, pl, orb, nrow, iE, iK, pl_start, pl_end, l, iEp, iEm
+    type(TMatLabel) :: label, labelp
     type(z_dns), pointer :: pG
     type(z_dns) :: sig
+    complex(dp) :: acc
+    real(dp) :: fac_em, fac_abs, wgt
 
     if (.not. site_ok(this)) return
     if (this%V2 <= 0.0_dp) return
     if (.not. associated(this%G_n)) return
     if (.not. associated(this%sigma_n)) return
+    if (.not. allocated(this%Ml)) return
 
     select type(pGcache => this%G_n)
     type is (TMatrixCacheMem)
@@ -384,23 +467,63 @@ contains
       end if
     end select
 
+    fac_em  = this%Nq + 1.0_dp
+    fac_abs = this%Nq
+
     label%spin = 1
     label%row_block = pl
     label%col_block = pl
+    labelp = label
 
     do iK = 1, nK
       do iE = 1, nE
         label%kpoint = iK
         label%energy_point = iE
-        if (.not. this%G_n%is_cached(label)) cycle
-        call this%G_n%retrieve_pointer(pG, label)
-        if (.not. associated(pG)) cycle
-        if (.not. allocated(pG%val)) cycle
-        if (orb > size(pG%val, 1)) cycle
+        acc = (0.0_dp, 0.0_dp)
+
+        do l = 0, this%l_max
+          wgt = this%Ml(l)
+          if (wgt <= 0.0_dp) cycle
+
+          iEm = iE - l * this%iEshift
+          if (iEm >= 1 .and. iEm <= nE) then
+            labelp%kpoint = iK
+            labelp%energy_point = iEm
+            if (this%G_n%is_cached(labelp)) then
+              call this%G_n%retrieve_pointer(pG, labelp)
+              if (associated(pG)) then
+                if (allocated(pG%val)) then
+                  if (orb <= size(pG%val, 1)) then
+                    acc = acc + wgt * fac_em * pG%val(orb, orb)
+                  end if
+                end if
+              end if
+            end if
+          end if
+
+          if (l == 0) cycle
+          iEp = iE + l * this%iEshift
+          if (iEp >= 1 .and. iEp <= nE) then
+            labelp%kpoint = iK
+            labelp%energy_point = iEp
+            if (this%G_n%is_cached(labelp)) then
+              call this%G_n%retrieve_pointer(pG, labelp)
+              if (associated(pG)) then
+                if (allocated(pG%val)) then
+                  if (orb <= size(pG%val, 1)) then
+                    acc = acc + wgt * fac_abs * pG%val(orb, orb)
+                  end if
+                end if
+              end if
+            end if
+          end if
+        end do
+
+        if (acc == (0.0_dp, 0.0_dp)) cycle
 
         call create(sig, nrow, nrow)
         sig%val = (0.0_dp, 0.0_dp)
-        sig%val(orb, orb) = this%V2 * pG%val(orb, orb)
+        sig%val(orb, orb) = this%V2 * acc
         call this%sigma_n%add(sig, label)
         call mat_destroy(sig)
       end do
@@ -408,9 +531,6 @@ contains
 
   end subroutine compute_Sigma_n
 
-  ! Only clear matrix storage — keep sigma_r/sigma_n objects associated.
-  ! compute_sigmas_inelastic calls destroy then compute; deallocating the
-  ! pointer here would make the subsequent compute a no-op (phonon pattern).
   subroutine destroy_Sigma_r(this)
     class(TSrhMultiphonon) :: this
     if (associated(this%sigma_r)) then
@@ -437,6 +557,7 @@ contains
       deallocate(this%sigma_n)
       nullify(this%sigma_n)
     end if
+    if (allocated(this%Ml)) deallocate(this%Ml)
   end subroutine destroy
 
 end module srh_multiphonon

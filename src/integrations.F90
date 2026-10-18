@@ -42,6 +42,7 @@ module integrations
  use ln_elastic
  use ln_inelastic
  use elphinel
+ use srh_multiphonon
  use ln_enums, only : integration_type
 #:if defined("MPI")
   use libmpifx_module
@@ -2259,6 +2260,9 @@ contains
           call pInter%set_kpoints(negf%kpoints, negf%kweights, negf%local_k_index)
         end if
         call pInter%prepare()
+      type is(TSrhMultiphonon)
+        deltaE = real(negf%en_grid(2)%Ec - negf%en_grid(1)%Ec)
+        call pInter%set_EnGrid(deltaE)
       end select
       it => it%next
     end do
