@@ -1700,14 +1700,20 @@ contains
       negf%local_en_points = np + mod(Npoints,numprocs)
     end if
 
-    if ( get_max_wq(negf%interactList) == 0.0_dp) then
+    ! Contiguous energy blocks + local pt_cpu are required whenever any
+    ! interaction is registered (SCBA caches G_r/G_n with local energy index).
+    ! Round-robin is only valid for pure coherent transport (no interactions).
+    ! Previously only max_wq>0 triggered contiguous mode; SRH has wq=0 so it
+    ! fell into round-robin with unset pt_cpu → "energy_point out of range".
+    if (negf%interactList%counter == 0) then
       ! distribute energy grid round robin scheme
       !     0 1 2 3 ... 0 1 2 .... 0 1 2 ....
       do i = 0, Npoints-1
         negf%en_grid(i+1)%cpu = mod(i,numprocs)
+        negf%en_grid(i+1)%pt_cpu = i/numprocs + 1
       enddo
     else
-      ! With inelastic points must be contigous
+      ! With interactions, points must be contiguous and pt_cpu set
       !    0 0 0 0 ... 1 1 1 .... 2 2 2 ....
       allocate(seq(np))
       do k = 1, np

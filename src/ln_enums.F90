@@ -54,6 +54,7 @@ module ln_enums
     integer :: nonpolaroptical = 5
     integer :: acousticinel = 6
     integer :: matrixcoupling = 7
+    integer :: srh = 8
   end type TModelsEnum
 
   type(TModelsEnum), parameter :: interaction_models = TModelsEnum()

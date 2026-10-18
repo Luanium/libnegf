@@ -58,7 +58,7 @@ module libnegf
  public :: Tnegf
  public :: set_bp_dephasing
  public :: set_elph_dephasing, set_elph_block_dephasing, set_elph_s_dephasing
- public :: set_elph_polaroptical, set_elph_nonpolaroptical, destroy_interactions
+ public :: set_elph_polaroptical, set_elph_nonpolaroptical, set_srh_defect, destroy_interactions
  public :: interaction_models, integration_type
  public :: set_clock, write_clock
  public :: writeMemInfo, writePeakInfo

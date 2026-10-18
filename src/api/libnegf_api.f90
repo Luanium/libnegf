@@ -1457,6 +1457,33 @@ subroutine negf_set_scba_tolerances(handler, elastic_tol, inelastic_tol) bind(c)
 end subroutine negf_set_scba_tolerances
 
 
+!> Register skeleton SRH defect interaction (Stage 4).
+!! Sigma is still a no-op; parameters are stored for later physics fill-in.
+subroutine negf_set_srh_defect(handler, Ed0, rho_d, Cn, Cp, temperature, pl_index, orb_index, scba_niter) bind(c)
+  use iso_c_binding, only : c_int, c_double ! if:mod:use
+  use libnegfAPICommon  ! if:mod:use
+  use libnegf   ! if:mod:use
+  use ln_precision      ! if:mod:use
+  use lib_param      ! if:mod:use
+  implicit none
+  integer(c_int) :: handler(DAC_handlerSize)  ! if:var:in
+  real(c_double), intent(in), value :: Ed0 ! if:var:in
+  real(c_double), intent(in), value :: rho_d ! if:var:in
+  real(c_double), intent(in), value :: Cn ! if:var:in
+  real(c_double), intent(in), value :: Cp ! if:var:in
+  real(c_double), intent(in), value :: temperature ! if:var:in
+  integer(c_int), intent(in), value :: pl_index ! if:var:in
+  integer(c_int), intent(in), value :: orb_index ! if:var:in
+  integer(c_int), intent(in), value :: scba_niter ! if:var:in
+
+  type(NEGFpointers) :: LIB
+
+  LIB = transfer(handler, LIB)
+  call set_srh_defect(LIB%pNEGF, Ed0, rho_d, Cn, Cp, temperature, pl_index, orb_index, scba_niter)
+
+end subroutine negf_set_srh_defect
+
+
 !!> Write memory statistics
 !! @param [in] handler: handler Number for the LIBNEGF instance
 subroutine negf_mem_stats(handler) bind(c)

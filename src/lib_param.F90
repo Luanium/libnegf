@@ -35,6 +35,7 @@ module lib_param
   use elphds, only : ElPhonDephS, ElPhonDephS_create, ElPhonDephS_init
   use elphinel, only : ElPhonPolarOptical, ElPhonPO_create, ElPhonPO_init
   use elphinel, only : ElPhonNonPolarOptical, ElPhonNonPO_create, ElPhonNonPO_init
+  use srh_multiphonon, only : TSrhMultiphonon, TSrhMultiphonon_create, TSrhMultiphonon_init
   use equiv_kpoints, only : TEqPointsArray
   use scba
   use ln_cache
@@ -56,6 +57,7 @@ module lib_param
   public :: set_elph_s_dephasing
   public :: set_elph_polaroptical
   public :: set_elph_nonpolaroptical
+  public :: set_srh_defect
   integer, public, parameter :: MAXNCONT=10
   integer, public, parameter :: MAXNLAYERS=10000
 
@@ -557,6 +559,28 @@ contains
     end select
 
   end subroutine set_elph_nonpolaroptical
+
+
+  !> Register skeleton SRH / multiphonon defect interaction (one site).
+  !! Physics of Sigma is still a no-op; parameters are stored for later fill-in.
+  subroutine set_srh_defect(negf, Ed0, rho_d, Cn, Cp, temperature, pl_index, orb_index, niter)
+    type(Tnegf), intent(inout) :: negf
+    real(dp), intent(in) :: Ed0, rho_d, Cn, Cp, temperature
+    integer, intent(in) :: pl_index, orb_index, niter
+
+    type(TInteractionNode), pointer :: node
+
+    call negf%interactList%add(node)
+    call TSrhMultiphonon_create(node%inter)
+    select type(pInter => node%inter)
+    type is(TSrhMultiphonon)
+      call TSrhMultiphonon_init(pInter, negf%str, Ed0, rho_d, Cn, Cp, temperature, &
+          & pl_index, orb_index, niter)
+    class default
+      call error_msg('ERROR: error of type downcast to TSrhMultiphonon')
+    end select
+
+  end subroutine set_srh_defect
 
 
   !> clean interactions objects

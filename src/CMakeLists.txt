@@ -32,6 +32,7 @@ set(sources-fpp
     elphdb.F90
     elphds.F90
     elphinel.F90
+    srh_multiphonon.F90
     self_energy.F90
     scba.F90
     sparskit/skit_blassm.F90
