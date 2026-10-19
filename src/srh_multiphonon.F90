@@ -4,8 +4,8 @@
 !!                                                                          !
 !! SRH multiphonon defect interaction (Stage 7).                            !
 !! Physically inelastic (Aeberhard 2019): TInelastic + energy-indexed       !
-!! Sigma cache. Stage 6: multiphonon ladder. Stage 7: defect occupation fd  !
-!! and net rate diagnostic from continuum G at (pl,orb). Full Gd later.    !
+!! Sigma cache + multiphonon ladder. Occupation fd diagnostics; fd weights  !
+!! emission/absorption in Sigma. Full defect GF Gd still deferred.          !
 !!--------------------------------------------------------------------------!
 
 module srh_multiphonon
@@ -368,8 +368,9 @@ contains
       end if
     end select
 
-    fac_em  = this%Nq + 1.0_dp
-    fac_abs = this%Nq
+    ! Capture into empty defect ~ (1-fd)*(Nq+1); emission from occupied ~ fd*Nq
+    fac_em  = (this%Nq + 1.0_dp) * (1.0_dp - this%fd)
+    fac_abs = this%Nq * this%fd
 
     label%spin = 1
     label%row_block = pl
@@ -472,8 +473,9 @@ contains
       end if
     end select
 
-    fac_em  = this%Nq + 1.0_dp
-    fac_abs = this%Nq
+    ! Same fd weighting as Sigma_r (from previous SCBA iter / init fd=0.5)
+    fac_em  = (this%Nq + 1.0_dp) * (1.0_dp - this%fd)
+    fac_abs = this%Nq * this%fd
 
     label%spin = 1
     label%row_block = pl
