@@ -561,12 +561,16 @@ contains
   end subroutine set_elph_nonpolaroptical
 
 
-  !> Register skeleton SRH / multiphonon defect interaction (one site).
-  !! Physics of Sigma is still a no-op; parameters are stored for later fill-in.
-  subroutine set_srh_defect(negf, Ed0, rho_d, Cn, Cp, temperature, pl_index, orb_index, niter)
+  !> Register the SRH multiphonon defect interaction (one defect level, one orbital).
+  !! Ed_rel is the defect level above the local valence band edge [eV]; Ev_abs / Ec_abs
+  !! are the band edges at the defect site on the NEGF energy axis [eV].
+  subroutine set_srh_defect(negf, Ed_rel, rho_d, Cn, Cp, temperature, pl_index, orb_index, niter, &
+      & phonon_energy, huang_rhys, mass_c, mass_v, Ev_abs, Ec_abs, cell_volume, line_width)
     type(Tnegf), intent(inout) :: negf
-    real(dp), intent(in) :: Ed0, rho_d, Cn, Cp, temperature
+    real(dp), intent(in) :: Ed_rel, rho_d, Cn, Cp, temperature
     integer, intent(in) :: pl_index, orb_index, niter
+    real(dp), intent(in) :: phonon_energy, huang_rhys, mass_c, mass_v
+    real(dp), intent(in) :: Ev_abs, Ec_abs, cell_volume, line_width
 
     type(TInteractionNode), pointer :: node
 
@@ -574,8 +578,9 @@ contains
     call TSrhMultiphonon_create(node%inter)
     select type(pInter => node%inter)
     type is(TSrhMultiphonon)
-      call TSrhMultiphonon_init(pInter, negf%str, Ed0, rho_d, Cn, Cp, temperature, &
-          & pl_index, orb_index, niter)
+      call TSrhMultiphonon_init(pInter, negf%str, Ed_rel, rho_d, Cn, Cp, temperature, &
+          & pl_index, orb_index, niter, phonon_energy, huang_rhys, mass_c, mass_v, &
+          & Ev_abs, Ec_abs, cell_volume, line_width)
     class default
       call error_msg('ERROR: error of type downcast to TSrhMultiphonon')
     end select

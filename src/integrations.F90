@@ -2262,7 +2262,8 @@ contains
         call pInter%prepare()
       type is(TSrhMultiphonon)
         deltaE = real(negf%en_grid(2)%Ec - negf%en_grid(1)%Ec)
-        call pInter%set_EnGrid(deltaE)
+        call pInter%set_EnGrid(real(negf%en_grid(1)%Ec), deltaE, size(negf%en_grid), &
+            & negf%local_en_points, negf%kweights, negf%local_k_index)
       end select
       it => it%next
     end do

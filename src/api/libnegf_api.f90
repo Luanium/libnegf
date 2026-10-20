@@ -1457,9 +1457,12 @@ subroutine negf_set_scba_tolerances(handler, elastic_tol, inelastic_tol) bind(c)
 end subroutine negf_set_scba_tolerances
 
 
-!> Register skeleton SRH defect interaction (Stage 4).
-!! Sigma is still a no-op; parameters are stored for later physics fill-in.
-subroutine negf_set_srh_defect(handler, Ed0, rho_d, Cn, Cp, temperature, pl_index, orb_index, scba_niter) bind(c)
+!> Register the SRH multiphonon defect interaction (one defect level, one orbital).
+!! Ed_rel: defect level above the local valence band edge [eV]; Ev_abs, Ec_abs: band edges
+!! at the defect site on the NEGF energy axis [eV]; rho_d [cm^-3]; Cn, Cp = sigma*v_th [cm^3/s];
+!! phonon_energy [eV]; huang_rhys [-]; mass_c, mass_v [m0]; cell_volume [cm^3]; line_width [eV].
+subroutine negf_set_srh_defect(handler, Ed_rel, rho_d, Cn, Cp, temperature, pl_index, orb_index, scba_niter, &
+    & phonon_energy, huang_rhys, mass_c, mass_v, Ev_abs, Ec_abs, cell_volume, line_width) bind(c)
   use iso_c_binding, only : c_int, c_double ! if:mod:use
   use libnegfAPICommon  ! if:mod:use
   use libnegf   ! if:mod:use
@@ -1467,7 +1470,7 @@ subroutine negf_set_srh_defect(handler, Ed0, rho_d, Cn, Cp, temperature, pl_inde
   use lib_param      ! if:mod:use
   implicit none
   integer(c_int) :: handler(DAC_handlerSize)  ! if:var:in
-  real(c_double), intent(in), value :: Ed0 ! if:var:in
+  real(c_double), intent(in), value :: Ed_rel ! if:var:in
   real(c_double), intent(in), value :: rho_d ! if:var:in
   real(c_double), intent(in), value :: Cn ! if:var:in
   real(c_double), intent(in), value :: Cp ! if:var:in
@@ -1475,11 +1478,20 @@ subroutine negf_set_srh_defect(handler, Ed0, rho_d, Cn, Cp, temperature, pl_inde
   integer(c_int), intent(in), value :: pl_index ! if:var:in
   integer(c_int), intent(in), value :: orb_index ! if:var:in
   integer(c_int), intent(in), value :: scba_niter ! if:var:in
+  real(c_double), intent(in), value :: phonon_energy ! if:var:in
+  real(c_double), intent(in), value :: huang_rhys ! if:var:in
+  real(c_double), intent(in), value :: mass_c ! if:var:in
+  real(c_double), intent(in), value :: mass_v ! if:var:in
+  real(c_double), intent(in), value :: Ev_abs ! if:var:in
+  real(c_double), intent(in), value :: Ec_abs ! if:var:in
+  real(c_double), intent(in), value :: cell_volume ! if:var:in
+  real(c_double), intent(in), value :: line_width ! if:var:in
 
   type(NEGFpointers) :: LIB
 
   LIB = transfer(handler, LIB)
-  call set_srh_defect(LIB%pNEGF, Ed0, rho_d, Cn, Cp, temperature, pl_index, orb_index, scba_niter)
+  call set_srh_defect(LIB%pNEGF, Ed_rel, rho_d, Cn, Cp, temperature, pl_index, orb_index, scba_niter, &
+      & phonon_energy, huang_rhys, mass_c, mass_v, Ev_abs, Ec_abs, cell_volume, line_width)
 
 end subroutine negf_set_srh_defect
 
