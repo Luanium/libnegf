@@ -9,8 +9,10 @@
 !!   [P] A. Pilotto et al., Solid-State Electron. 198, 108469 (2022) Eq. 4-7!
 !!                                                                          !
 !! One localized defect level (delta-like spectral function, Eq. 8 of [A]) !
-!! at orbital (pl_index, orb_index).  Per SCBA iteration:                  !
-!!  1. local band Green's functions G^n, G^p = A - G^n at the defect orbital !
+!! at the site (pl_index; orbitals orb_index .. orb_index+n_orb-1).        !
+!! Per SCBA iteration:                                                      !
+!!  1. local band Green's functions G^n, G^p = A - G^n at the defect site    !
+!!     (average over the n_orb orbitals of the site, then over k)           !
 !!     (k-averaged) are read from the libNEGF caches (full G: conduction   !
 !!     and valence band are both contained, no separation needed).          !
 !!  2. defect self-energies (Eqs. 45-48 of [A]), ladder l = 0..lmax:        !
@@ -24,7 +26,8 @@
 !!  4. net recombination per defect (Eqs. 55,58; closed form, no cancel.)  !
 !!       R = (S^n_dc S^p_dv - S^p_dc S^n_dv) / (Gamma hbar),  U = rho_d R   !
 !!  5. band self-energies from the DEFECT Green's function (Eqs. 49-52),    !
-!!     G^n_d = fd A_d, G^p_d = (1-fd) A_d, written at the defect orbital:   !
+!!     G^n_d = fd A_d, G^p_d = (1-fd) A_d, written on EVERY orbital of the  !
+!!     defect site (same value; flux-consistent, see Limitations):         !
 !!       S^n_cd(E) = x_d sum_l Mn(l) e^{-b l hw} fd     A_d(E - l hw)       !
 !!       S^p_cd(E) = x_d sum_l Mn(l)             (1-fd) A_d(E - l hw)       !
 !!       S^n_vd(E) = x_d sum_l Mp(l)             fd     A_d(E + l hw)       !
@@ -41,7 +44,13 @@
 !! Hole weight uses (l+S)^2/S, electron weight (l-S)^2/S ([A] Eq. A5, A10).  !
 !!                                                                          !
 !! Limitations (first complete version): one MPI rank on energy and k axes; !
-!! single orbital per defect; uniform energy grid; defect energy fixed in   !
+!! one defect per SITE: in a multi-orbital basis the conduction and valence !
+!! states sit on different orbitals, so the defect sees the orbital average !
+!! G_loc = (1/n_orb) sum_o G_oo and the same Sigma is put on every orbital: !
+!! the exchanged flux is then sum_o Sigma G_oo = n_orb Sigma G_loc, which   !
+!! equals rho_d V_site R_def when cell_volume is the volume per ORBITAL     !
+!! (V_site / n_orb).  For n_orb = 1 this is the single-orbital model.       !
+!! Uniform energy grid; defect energy fixed in                              !
 !! absolute energy (local band edges given by the user).                    !
 !!--------------------------------------------------------------------------!
 
@@ -94,9 +103,11 @@ module srh_multiphonon
     real(dp) :: Cn = 0.0_dp
     real(dp) :: Cp = 0.0_dp
     real(dp) :: temperature = 300.0_dp
-    !> orbital where the defect couples (1-based)
+    !> defect site: principal layer, first orbital (row inside the PL block, 1-based)
+    !! and number of consecutive orbitals that belong to the site
     integer :: pl_index = 0
     integer :: orb_index = 0
+    integer :: n_orb = 1
     !> phonon energy as given by the user [eV]
     real(dp) :: hw_in = 0.0_dp
     !> Huang-Rhys factor
@@ -455,13 +466,14 @@ contains
     integer :: nbl, pl_start, pl_end, nrow
 
     site_ok = .false.
-    if (this%pl_index < 1 .or. this%orb_index < 1) return
+    if (this%pl_index < 1 .or. this%orb_index < 1 .or. this%n_orb < 1) return
     nbl = this%struct%num_PLs
     if (this%pl_index > nbl) return
     pl_start = this%struct%mat_PL_start(this%pl_index)
     pl_end   = this%struct%mat_PL_end(this%pl_index)
     nrow = pl_end - pl_start + 1
-    if (this%orb_index > nrow) return
+    ! the whole site (n_orb consecutive rows) must lie inside the PL block
+    if (this%orb_index + this%n_orb - 1 > nrow) return
     site_ok = .true.
   end function site_ok
 
@@ -636,8 +648,15 @@ contains
           call this%G_n%retrieve_pointer(pG, label)
           if (associated(pG)) then
             if (allocated(pG%val)) then
-              if (orb <= size(pG%val, 1)) then
-                Gn_loc(iE) = Gn_loc(iE) + this%kw(iK) * real(pG%val(orb, orb), dp)
+              if (orb + this%n_orb - 1 <= size(pG%val, 1)) then
+                block
+                  integer :: io
+                  ! orbital average over the defect site, then k weight
+                  do io = orb, orb + this%n_orb - 1
+                    Gn_loc(iE) = Gn_loc(iE) + this%kw(iK) * real(pG%val(io, io), dp) &
+                        & / real(this%n_orb, dp)
+                  end do
+                end block
               end if
             end if
           end if
@@ -646,8 +665,14 @@ contains
           call this%G_r%retrieve_pointer(pG, label)
           if (associated(pG)) then
             if (allocated(pG%val)) then
-              if (orb <= size(pG%val, 1)) then
-                A_loc(iE) = A_loc(iE) - 2.0_dp * this%kw(iK) * aimag(pG%val(orb, orb))
+              if (orb + this%n_orb - 1 <= size(pG%val, 1)) then
+                block
+                  integer :: io
+                  do io = orb, orb + this%n_orb - 1
+                    A_loc(iE) = A_loc(iE) - 2.0_dp * this%kw(iK) * aimag(pG%val(io, io)) &
+                        & / real(this%n_orb, dp)
+                  end do
+                end block
               end if
             end if
           end if
@@ -777,7 +802,10 @@ contains
         label%energy_point = iE
         call create(sig, nrow, nrow)
         sig%val = (0.0_dp, 0.0_dp)
-        sig%val(orb, orb) = cmplx(this%Sn_b(iE), 0.0_dp, dp)
+        ! same value on every orbital of the defect site
+        do jj = orb, orb + this%n_orb - 1
+          sig%val(jj, jj) = cmplx(this%Sn_b(iE), 0.0_dp, dp)
+        end do
         call this%sigma_n%add(sig, label)
         call mat_destroy(sig)
       end do
@@ -837,7 +865,12 @@ contains
         label%energy_point = iE
         call create(sig, nrow, nrow)
         sig%val = (0.0_dp, 0.0_dp)
-        sig%val(orb, orb) = cmplx(0.0_dp, -0.5_dp * gam, dp)
+        block
+          integer :: io
+          do io = orb, orb + this%n_orb - 1
+            sig%val(io, io) = cmplx(0.0_dp, -0.5_dp * gam, dp)
+          end do
+        end block
         call this%sigma_r%add(sig, label)
         call mat_destroy(sig)
       end do

@@ -1461,8 +1461,8 @@ end subroutine negf_set_scba_tolerances
 !! Ed_rel: defect level above the local valence band edge [eV]; Ev_abs, Ec_abs: band edges
 !! at the defect site on the NEGF energy axis [eV]; rho_d [cm^-3]; Cn, Cp = sigma*v_th [cm^3/s];
 !! phonon_energy [eV]; huang_rhys [-]; mass_c, mass_v [m0]; cell_volume [cm^3]; line_width [eV].
-subroutine negf_set_srh_defect(handler, Ed_rel, rho_d, Cn, Cp, temperature, pl_index, orb_index, scba_niter, &
-    & phonon_energy, huang_rhys, mass_c, mass_v, Ev_abs, Ec_abs, cell_volume, line_width) bind(c)
+subroutine negf_set_srh_defect(handler, Ed_rel, rho_d, Cn, Cp, temperature, pl_index, orb_index, n_orb, &
+    & scba_niter, phonon_energy, huang_rhys, mass_c, mass_v, Ev_abs, Ec_abs, cell_volume, line_width) bind(c)
   use iso_c_binding, only : c_int, c_double ! if:mod:use
   use libnegfAPICommon  ! if:mod:use
   use libnegf   ! if:mod:use
@@ -1477,6 +1477,7 @@ subroutine negf_set_srh_defect(handler, Ed_rel, rho_d, Cn, Cp, temperature, pl_i
   real(c_double), intent(in), value :: temperature ! if:var:in
   integer(c_int), intent(in), value :: pl_index ! if:var:in
   integer(c_int), intent(in), value :: orb_index ! if:var:in
+  integer(c_int), intent(in), value :: n_orb ! if:var:in
   integer(c_int), intent(in), value :: scba_niter ! if:var:in
   real(c_double), intent(in), value :: phonon_energy ! if:var:in
   real(c_double), intent(in), value :: huang_rhys ! if:var:in
@@ -1490,10 +1491,36 @@ subroutine negf_set_srh_defect(handler, Ed_rel, rho_d, Cn, Cp, temperature, pl_i
   type(NEGFpointers) :: LIB
 
   LIB = transfer(handler, LIB)
-  call set_srh_defect(LIB%pNEGF, Ed_rel, rho_d, Cn, Cp, temperature, pl_index, orb_index, scba_niter, &
+  call set_srh_defect(LIB%pNEGF, Ed_rel, rho_d, Cn, Cp, temperature, pl_index, orb_index, n_orb, scba_niter, &
       & phonon_energy, huang_rhys, mass_c, mass_v, Ev_abs, Ec_abs, cell_volume, line_width)
 
 end subroutine negf_set_srh_defect
+
+
+!> Read back SRH diagnostics of the first SRH defect interaction.
+!! res(1:8) = fd, 1-fd, R_def [1/s], U=rho_d*R_def [cm^-3 s^-1], Sn_dc, Sp_dc, Sn_dv, Sp_dv [eV].
+!! ierr = 0 on success, 1 if no SRH interaction is registered.
+subroutine negf_get_srh_results(handler, res, ierr) bind(c)
+  use iso_c_binding, only : c_int, c_double ! if:mod:use
+  use libnegfAPICommon  ! if:mod:use
+  use libnegf   ! if:mod:use
+  use ln_precision      ! if:mod:use
+  use lib_param      ! if:mod:use
+  implicit none
+  integer(c_int) :: handler(DAC_handlerSize)  ! if:var:in
+  real(c_double), intent(out) :: res(*) ! if:var:out
+  integer(c_int), intent(out) :: ierr ! if:var:out
+
+  type(NEGFpointers) :: LIB
+  real(dp) :: tmp(8)
+  integer :: ierr_loc
+
+  LIB = transfer(handler, LIB)
+  call get_srh_results(LIB%pNEGF, tmp, ierr_loc)
+  res(1:8) = tmp
+  ierr = ierr_loc
+
+end subroutine negf_get_srh_results
 
 
 !!> Write memory statistics

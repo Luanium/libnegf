@@ -58,6 +58,7 @@ module lib_param
   public :: set_elph_polaroptical
   public :: set_elph_nonpolaroptical
   public :: set_srh_defect
+  public :: get_srh_results
   integer, public, parameter :: MAXNCONT=10
   integer, public, parameter :: MAXNLAYERS=10000
 
@@ -564,15 +565,19 @@ contains
   !> Register the SRH multiphonon defect interaction (one defect level, one orbital).
   !! Ed_rel is the defect level above the local valence band edge [eV]; Ev_abs / Ec_abs
   !! are the band edges at the defect site on the NEGF energy axis [eV].
-  subroutine set_srh_defect(negf, Ed_rel, rho_d, Cn, Cp, temperature, pl_index, orb_index, niter, &
+  subroutine set_srh_defect(negf, Ed_rel, rho_d, Cn, Cp, temperature, pl_index, orb_index, n_orb, niter, &
       & phonon_energy, huang_rhys, mass_c, mass_v, Ev_abs, Ec_abs, cell_volume, line_width)
     type(Tnegf), intent(inout) :: negf
     real(dp), intent(in) :: Ed_rel, rho_d, Cn, Cp, temperature
-    integer, intent(in) :: pl_index, orb_index, niter
+    !> pl_index: principal layer; orb_index: first row of the defect site inside the PL block;
+    !! n_orb: number of consecutive rows (orbitals) that form the site
+    integer, intent(in) :: pl_index, orb_index, n_orb, niter
     real(dp), intent(in) :: phonon_energy, huang_rhys, mass_c, mass_v
     real(dp), intent(in) :: Ev_abs, Ec_abs, cell_volume, line_width
 
     type(TInteractionNode), pointer :: node
+
+    if (n_orb < 1) call error_msg('SRH defect: number of orbitals of the defect site must be >= 1')
 
     call negf%interactList%add(node)
     call TSrhMultiphonon_create(node%inter)
@@ -581,11 +586,45 @@ contains
       call TSrhMultiphonon_init(pInter, negf%str, Ed_rel, rho_d, Cn, Cp, temperature, &
           & pl_index, orb_index, niter, phonon_energy, huang_rhys, mass_c, mass_v, &
           & Ev_abs, Ec_abs, cell_volume, line_width)
+      pInter%n_orb = n_orb
     class default
       call error_msg('ERROR: error of type downcast to TSrhMultiphonon')
     end select
 
   end subroutine set_srh_defect
+
+
+  !> Read back the SRH diagnostics of the (first) SRH defect interaction.
+  !! res(1:8) = fd, 1-fd, R_def [1/s], U = rho_d*R_def [cm^-3 s^-1],
+  !!            Sn_dc, Sp_dc, Sn_dv, Sp_dv [eV].  ierr = 0 if found, 1 otherwise.
+  subroutine get_srh_results(negf, res, ierr)
+    type(Tnegf), intent(in) :: negf
+    real(dp), intent(out) :: res(8)
+    integer, intent(out) :: ierr
+
+    type(TInteractionNode), pointer :: it
+
+    res = 0.0_dp
+    ierr = 1
+    it => negf%interactList%first
+    do while (associated(it))
+      select type(pInter => it%inter)
+      type is(TSrhMultiphonon)
+        res(1) = pInter%fd
+        res(2) = pInter%omfd
+        res(3) = pInter%R_def
+        res(4) = pInter%U_rec
+        res(5) = pInter%Sn_dc
+        res(6) = pInter%Sp_dc
+        res(7) = pInter%Sn_dv
+        res(8) = pInter%Sp_dv
+        ierr = 0
+        return
+      end select
+      it => it%next
+    end do
+
+  end subroutine get_srh_results
 
 
   !> clean interactions objects
