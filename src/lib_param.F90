@@ -58,6 +58,8 @@ module lib_param
   public :: set_elph_polaroptical
   public :: set_elph_nonpolaroptical
   public :: set_srh_defect
+  public :: add_srh_site
+  public :: get_srh_nsites
   public :: get_srh_results
   integer, public, parameter :: MAXNCONT=10
   integer, public, parameter :: MAXNLAYERS=10000
@@ -584,9 +586,9 @@ contains
     select type(pInter => node%inter)
     type is(TSrhMultiphonon)
       call TSrhMultiphonon_init(pInter, negf%str, Ed_rel, rho_d, Cn, Cp, temperature, &
-          & pl_index, orb_index, niter, phonon_energy, huang_rhys, mass_c, mass_v, &
-          & Ev_abs, Ec_abs, cell_volume, line_width)
-      pInter%n_orb = n_orb
+          & niter, phonon_energy, huang_rhys, mass_c, mass_v, cell_volume, line_width)
+      ! first site of this defect species; more sites are added with add_srh_site
+      call pInter%add_site(pl_index, orb_index, n_orb, Ev_abs, Ec_abs, 1.0_dp)
     class default
       call error_msg('ERROR: error of type downcast to TSrhMultiphonon')
     end select
@@ -594,32 +596,81 @@ contains
   end subroutine set_srh_defect
 
 
-  !> Read back the SRH diagnostics of the (first) SRH defect interaction.
-  !! res(1:8) = fd, 1-fd, R_def [1/s], U = rho_d*R_def [cm^-3 s^-1],
-  !!            Sn_dc, Sp_dc, Sn_dv, Sp_dv [eV].  ierr = 0 if found, 1 otherwise.
-  subroutine get_srh_results(negf, res, ierr)
-    type(Tnegf), intent(in) :: negf
-    real(dp), intent(out) :: res(8)
-    integer, intent(out) :: ierr
+  !> Add one more site (same defect species) to the most recently registered SRH interaction.
+  !! weight: multiplicity of the site (e.g. 3 when only every third atom of a region is used).
+  subroutine add_srh_site(negf, pl_index, orb_index, n_orb, Ev_abs, Ec_abs, weight)
+    type(Tnegf), intent(inout) :: negf
+    integer, intent(in) :: pl_index, orb_index, n_orb
+    real(dp), intent(in) :: Ev_abs, Ec_abs, weight
 
-    type(TInteractionNode), pointer :: it
+    type(TInteractionNode), pointer :: it, last
 
-    res = 0.0_dp
-    ierr = 1
+    nullify(last)
     it => negf%interactList%first
     do while (associated(it))
       select type(pInter => it%inter)
       type is(TSrhMultiphonon)
-        res(1) = pInter%fd
-        res(2) = pInter%omfd
-        res(3) = pInter%R_def
-        res(4) = pInter%U_rec
-        res(5) = pInter%Sn_dc
-        res(6) = pInter%Sp_dc
-        res(7) = pInter%Sn_dv
-        res(8) = pInter%Sp_dv
-        ierr = 0
-        return
+        last => it
+      end select
+      it => it%next
+    end do
+    if (.not. associated(last)) call error_msg('SRH defect: add_srh_site called before set_srh_defect')
+
+    select type(pInter => last%inter)
+    type is(TSrhMultiphonon)
+      call pInter%add_site(pl_index, orb_index, n_orb, Ev_abs, Ec_abs, weight)
+    end select
+
+  end subroutine add_srh_site
+
+
+  !> Total number of SRH defect sites over all SRH interactions.
+  subroutine get_srh_nsites(negf, nsites)
+    type(Tnegf), intent(in) :: negf
+    integer, intent(out) :: nsites
+
+    type(TInteractionNode), pointer :: it
+
+    nsites = 0
+    it => negf%interactList%first
+    do while (associated(it))
+      select type(pInter => it%inter)
+      type is(TSrhMultiphonon)
+        nsites = nsites + pInter%n_sites
+      end select
+      it => it%next
+    end do
+
+  end subroutine get_srh_nsites
+
+
+  !> Read back the SRH diagnostics of site number isite (1-based, counted over all SRH
+  !! interactions in the order they were registered).
+  !! res(1:8) = fd, 1-fd, R_def [1/s], U = rho_d*R_def [cm^-3 s^-1],
+  !!            Sn_dc, Sp_dc, Sn_dv, Sp_dv [eV].  ierr = 0 if found, 1 otherwise.
+  subroutine get_srh_results(negf, isite, res, ierr)
+    type(Tnegf), intent(in) :: negf
+    integer, intent(in) :: isite
+    real(dp), intent(out) :: res(8)
+    integer, intent(out) :: ierr
+
+    type(TInteractionNode), pointer :: it
+    integer :: offset
+    logical :: ok
+
+    res = 0.0_dp
+    ierr = 1
+    offset = 0
+    it => negf%interactList%first
+    do while (associated(it))
+      select type(pInter => it%inter)
+      type is(TSrhMultiphonon)
+        if (isite > offset .and. isite <= offset + pInter%n_sites) then
+          call pInter%get_site_results(isite - offset, res, ok)
+          if (ok) ierr = 0
+          return
+        end if
+        offset = offset + pInter%n_sites
       end select
       it => it%next
     end do

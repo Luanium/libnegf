@@ -1497,10 +1497,9 @@ subroutine negf_set_srh_defect(handler, Ed_rel, rho_d, Cn, Cp, temperature, pl_i
 end subroutine negf_set_srh_defect
 
 
-!> Read back SRH diagnostics of the first SRH defect interaction.
-!! res(1:8) = fd, 1-fd, R_def [1/s], U=rho_d*R_def [cm^-3 s^-1], Sn_dc, Sp_dc, Sn_dv, Sp_dv [eV].
-!! ierr = 0 on success, 1 if no SRH interaction is registered.
-subroutine negf_get_srh_results(handler, res, ierr) bind(c)
+!> Add one more site (same defect species) to the most recently registered SRH interaction.
+!! Ev_abs, Ec_abs: band edges at the site on the NEGF energy axis [eV]; weight: multiplicity (>= 1).
+subroutine negf_add_srh_site(handler, pl_index, orb_index, n_orb, Ev_abs, Ec_abs, weight) bind(c)
   use iso_c_binding, only : c_int, c_double ! if:mod:use
   use libnegfAPICommon  ! if:mod:use
   use libnegf   ! if:mod:use
@@ -1508,6 +1507,54 @@ subroutine negf_get_srh_results(handler, res, ierr) bind(c)
   use lib_param      ! if:mod:use
   implicit none
   integer(c_int) :: handler(DAC_handlerSize)  ! if:var:in
+  integer(c_int), intent(in), value :: pl_index ! if:var:in
+  integer(c_int), intent(in), value :: orb_index ! if:var:in
+  integer(c_int), intent(in), value :: n_orb ! if:var:in
+  real(c_double), intent(in), value :: Ev_abs ! if:var:in
+  real(c_double), intent(in), value :: Ec_abs ! if:var:in
+  real(c_double), intent(in), value :: weight ! if:var:in
+
+  type(NEGFpointers) :: LIB
+
+  LIB = transfer(handler, LIB)
+  call add_srh_site(LIB%pNEGF, pl_index, orb_index, n_orb, Ev_abs, Ec_abs, weight)
+
+end subroutine negf_add_srh_site
+
+
+!> Total number of SRH defect sites (over all SRH interactions).
+subroutine negf_get_srh_nsites(handler, nsites) bind(c)
+  use iso_c_binding, only : c_int ! if:mod:use
+  use libnegfAPICommon  ! if:mod:use
+  use libnegf   ! if:mod:use
+  use ln_precision      ! if:mod:use
+  use lib_param      ! if:mod:use
+  implicit none
+  integer(c_int) :: handler(DAC_handlerSize)  ! if:var:in
+  integer(c_int), intent(out) :: nsites ! if:var:out
+
+  type(NEGFpointers) :: LIB
+  integer :: n_loc
+
+  LIB = transfer(handler, LIB)
+  call get_srh_nsites(LIB%pNEGF, n_loc)
+  nsites = n_loc
+
+end subroutine negf_get_srh_nsites
+
+
+!> Read back SRH diagnostics of site number isite (1-based).
+!! res(1:8) = fd, 1-fd, R_def [1/s], U=rho_d*R_def [cm^-3 s^-1], Sn_dc, Sp_dc, Sn_dv, Sp_dv [eV].
+!! ierr = 0 on success, 1 if isite is out of range.
+subroutine negf_get_srh_results(handler, isite, res, ierr) bind(c)
+  use iso_c_binding, only : c_int, c_double ! if:mod:use
+  use libnegfAPICommon  ! if:mod:use
+  use libnegf   ! if:mod:use
+  use ln_precision      ! if:mod:use
+  use lib_param      ! if:mod:use
+  implicit none
+  integer(c_int) :: handler(DAC_handlerSize)  ! if:var:in
+  integer(c_int), intent(in), value :: isite ! if:var:in
   real(c_double), intent(out) :: res(*) ! if:var:out
   integer(c_int), intent(out) :: ierr ! if:var:out
 
@@ -1516,7 +1563,7 @@ subroutine negf_get_srh_results(handler, res, ierr) bind(c)
   integer :: ierr_loc
 
   LIB = transfer(handler, LIB)
-  call get_srh_results(LIB%pNEGF, tmp, ierr_loc)
+  call get_srh_results(LIB%pNEGF, isite, tmp, ierr_loc)
   res(1:8) = tmp
   ierr = ierr_loc
 
