@@ -1570,6 +1570,23 @@ subroutine negf_get_srh_results(handler, isite, res, ierr) bind(c)
 end subroutine negf_get_srh_results
 
 
+!!> Drop all registered interactions (elastic + inelastic + SRH).
+!! Call before re-setup on a Poisson–NEGF iteration so sites and self-energies are not stacked.
+!! @param [in] handler: handler Number for the LIBNEGF instance
+subroutine negf_destroy_interactions(handler) bind(c)
+  use iso_c_binding, only : c_int ! if:mod:use
+  use libnegfAPICommon  ! if:mod:use
+  use lib_param, only : destroy_interactions  ! if:mod:use
+  implicit none
+  integer(c_int) :: handler(DAC_handlerSize)  ! if:var:in
+
+  type(NEGFpointers) :: LIB
+  LIB = transfer(handler, LIB)
+  call destroy_interactions(LIB%pNEGF)
+
+end subroutine negf_destroy_interactions
+
+
 !!> Write memory statistics
 !! @param [in] handler: handler Number for the LIBNEGF instance
 subroutine negf_mem_stats(handler) bind(c)
