@@ -61,6 +61,7 @@ module lib_param
   public :: add_srh_site
   public :: get_srh_nsites
   public :: get_srh_results
+  public :: get_srh_spectral
   integer, public, parameter :: MAXNCONT=10
   integer, public, parameter :: MAXNLAYERS=10000
 
@@ -676,6 +677,73 @@ contains
     end do
 
   end subroutine get_srh_results
+
+
+  !> Band self-energies Sn_b(E), Sp_b(E) [eV] for global site isite (1-based).
+  !! On success: nE > 0, E_i = Emin + (i-1)*dE, Sn/Sp filled for i=1..nE.
+  !! Sn, Sp must be allocated by the caller with size >= nE (use a first call with
+  !! nE_max=0 to query size only: pass null-sized arrays and read nE/Emin/dE).
+  !! ierr = 0 success, 1 site not found / spectral not ready, 2 buffer too small.
+  subroutine get_srh_spectral(negf, isite, nE_max, nE, Emin, dE, Sn, Sp, ierr)
+    type(Tnegf), intent(in) :: negf
+    integer, intent(in) :: isite
+    integer, intent(in) :: nE_max
+    integer, intent(out) :: nE
+    real(dp), intent(out) :: Emin, dE
+    real(dp), intent(out) :: Sn(*)
+    real(dp), intent(out) :: Sp(*)
+    integer, intent(out) :: ierr
+
+    type(TInteractionNode), pointer :: it
+    integer :: offset, nE_loc
+    real(dp) :: Emin_loc, dE_loc
+    logical :: ok
+    real(dp), allocatable :: Sn_tmp(:), Sp_tmp(:)
+
+    nE = 0
+    Emin = 0.0_dp
+    dE = 0.0_dp
+    ierr = 1
+    offset = 0
+    it => negf%interactList%first
+    do while (associated(it))
+      select type(pInter => it%inter)
+      type is(TSrhMultiphonon)
+        if (isite > offset .and. isite <= offset + pInter%n_sites) then
+          ! query size first with temporary full arrays
+          allocate(Sn_tmp(max(pInter%nE, 1)), Sp_tmp(max(pInter%nE, 1)))
+          call pInter%get_site_spectral(isite - offset, nE_loc, Emin_loc, dE_loc, &
+              & Sn_tmp, Sp_tmp, ok)
+          if (.not. ok .or. nE_loc < 1) then
+            deallocate(Sn_tmp, Sp_tmp)
+            return
+          end if
+          nE = nE_loc
+          Emin = Emin_loc
+          dE = dE_loc
+          ! nE_max == 0: size query only (return nE/Emin/dE, no fill)
+          if (nE_max == 0) then
+            deallocate(Sn_tmp, Sp_tmp)
+            ierr = 0
+            return
+          end if
+          if (nE_max < nE_loc) then
+            ierr = 2
+            deallocate(Sn_tmp, Sp_tmp)
+            return
+          end if
+          Sn(1:nE_loc) = Sn_tmp(1:nE_loc)
+          Sp(1:nE_loc) = Sp_tmp(1:nE_loc)
+          deallocate(Sn_tmp, Sp_tmp)
+          ierr = 0
+          return
+        end if
+        offset = offset + pInter%n_sites
+      end select
+      it => it%next
+    end do
+
+  end subroutine get_srh_spectral
 
 
   !> clean interactions objects

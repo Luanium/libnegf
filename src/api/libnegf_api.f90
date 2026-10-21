@@ -1570,6 +1570,55 @@ subroutine negf_get_srh_results(handler, isite, res, ierr) bind(c)
 end subroutine negf_get_srh_results
 
 
+!> Band self-energies Sn_b(E), Sp_b(E) [eV] for global site isite (1-based).
+!! Two-step use:
+!!   1) nE_max=0 → returns nE, Emin, dE (ierr=0 or 1); Sn/Sp ignored
+!!   2) nE_max>=nE → fills Sn[1..nE], Sp[1..nE]; ierr=0 ok, 1 missing, 2 buffer small
+!! E_i = Emin + (i-1)*dE.
+subroutine negf_get_srh_spectral(handler, isite, nE_max, nE, Emin, dE, Sn_arr, Sp_arr, ierr) bind(c)
+  use iso_c_binding, only : c_int, c_double ! if:mod:use
+  use libnegfAPICommon  ! if:mod:use
+  use libnegf   ! if:mod:use
+  use ln_precision      ! if:mod:use
+  use lib_param      ! if:mod:use
+  implicit none
+  integer(c_int) :: handler(DAC_handlerSize)  ! if:var:in
+  integer(c_int), intent(in), value :: isite ! if:var:in
+  integer(c_int), intent(in), value :: nE_max ! if:var:in
+  integer(c_int), intent(out) :: nE ! if:var:out
+  real(c_double), intent(out) :: Emin ! if:var:out
+  real(c_double), intent(out) :: dE ! if:var:out
+  ! Sn_arr / Sp_arr: avoid clash with ln_precision::sp kind parameter (Fortran case-insensitive)
+  real(c_double), intent(out) :: Sn_arr(*) ! if:var:out
+  real(c_double), intent(out) :: Sp_arr(*) ! if:var:out
+  integer(c_int), intent(out) :: ierr ! if:var:out
+
+  type(NEGFpointers) :: LIB
+  integer :: nE_loc, ierr_loc
+  real(dp) :: Emin_loc, dE_loc
+  real(dp), allocatable :: Sn_tmp(:), Sp_tmp(:)
+
+  LIB = transfer(handler, LIB)
+
+  ! Always allocate a temporary of at least 1 so the Fortran routine can report nE
+  allocate(Sn_tmp(max(nE_max, 1)), Sp_tmp(max(nE_max, 1)))
+  call get_srh_spectral(LIB%pNEGF, isite, max(nE_max, 0), nE_loc, Emin_loc, dE_loc, &
+      & Sn_tmp, Sp_tmp, ierr_loc)
+
+  nE = nE_loc
+  Emin = Emin_loc
+  dE = dE_loc
+  ierr = ierr_loc
+
+  if (ierr_loc == 0 .and. nE_max >= nE_loc .and. nE_loc > 0) then
+    Sn_arr(1:nE_loc) = Sn_tmp(1:nE_loc)
+    Sp_arr(1:nE_loc) = Sp_tmp(1:nE_loc)
+  end if
+  deallocate(Sn_tmp, Sp_tmp)
+
+end subroutine negf_get_srh_spectral
+
+
 !!> Drop all registered interactions (elastic + inelastic + SRH).
 !! Call before re-setup on a Poisson–NEGF iteration so sites and self-energies are not stacked.
 !! @param [in] handler: handler Number for the LIBNEGF instance

@@ -176,6 +176,7 @@ module srh_multiphonon
 
     procedure :: add_site
     procedure :: get_site_results
+    procedure :: get_site_spectral
     procedure :: add_sigma_r_sp
     procedure :: add_sigma_r_dp
     procedure :: add_sigma_n_sp
@@ -312,6 +313,40 @@ contains
     ok = .true.
 
   end subroutine get_site_results
+
+  !--------------------------------------------------------------------------
+  !> Band self-energies Sn_b(E), Sp_b(E) [eV] on the global energy grid for one site.
+  !! nE_out / Emin / dE describe the grid (E_i = Emin + (i-1)*dE, i=1..nE_out).
+  !! Sn, Sp must be size >= nE_out (caller allocates).  ok=.false. if site missing
+  !! or spectral arrays not yet computed.
+  subroutine get_site_spectral(this, isite, nE_out, Emin, dE, Sn, Sp, ok)
+    class(TSrhMultiphonon), intent(in) :: this
+    integer, intent(in) :: isite
+    integer, intent(out) :: nE_out
+    real(dp), intent(out) :: Emin, dE
+    real(dp), intent(out) :: Sn(*), Sp(*)
+    logical, intent(out) :: ok
+
+    integer :: n, i
+
+    nE_out = 0
+    Emin = 0.0_dp
+    dE = 0.0_dp
+    ok = .false.
+    if (isite < 1 .or. isite > this%n_sites) return
+    if (.not. allocated(this%sites(isite)%Sn_b) .or. .not. allocated(this%sites(isite)%Sp_b)) return
+    n = size(this%sites(isite)%Sn_b)
+    if (n < 1) return
+    nE_out = n
+    Emin = this%Emin
+    dE = this%dE
+    do i = 1, n
+      Sn(i) = this%sites(isite)%Sn_b(i)
+      Sp(i) = this%sites(isite)%Sp_b(i)
+    end do
+    ok = .true.
+
+  end subroutine get_site_spectral
 
   !--------------------------------------------------------------------------
   !> Called by libNEGF before the SCBA loop. Builds everything that depends on
