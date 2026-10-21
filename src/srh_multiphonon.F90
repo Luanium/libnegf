@@ -55,9 +55,11 @@
 !! Hole weight uses (l+S)^2/S, electron weight (l-S)^2/S ([A] Eq. A5, A10).  !
 !! The calibration is done per site (it depends on the local gap).          !
 !!                                                                          !
-!! Limitations: one MPI rank on energy and k axes; uniform energy grid;     !
-!! the defect energy is fixed in absolute energy by the local band edges    !
-!! given when the site is added.                                            !
+!! MPI: local k contributions are reduced over the k communicator and the  !
+!! resulting energy blocks over the energy communicator before evaluating   !
+!! the shifted phonon ladder.  A uniform energy grid is required; the       !
+!! defect energy is fixed in absolute energy by local band edges supplied   !
+!! when the site is added.                                                   !
 !!--------------------------------------------------------------------------!
 
 module srh_multiphonon
@@ -70,6 +72,12 @@ module srh_multiphonon
   use ln_structure, only : TStruct_info
   use mat_def, only : c_dns, z_dns
   use ln_cache, only : TMatrixCacheMem, TMatLabel
+#:if defined("MPI")
+  ! MPIFX collectives use the legacy integer MPI operation handles, not the
+  ! mpi_f08 derived MPI_Op handles.
+  use mpi, only : MPI_SUM
+  use libmpifx_module, only : mpifx_comm, mpifx_allreduceip
+#:endif
 
   implicit none
   private
@@ -157,6 +165,10 @@ module srh_multiphonon
     real(dp) :: Emin = 0.0_dp
     real(dp) :: dE = 0.0_dp
     integer :: nE = 0
+    !> number of energy points retained in the local Green-function cache
+    integer :: nE_local = 0
+    !> first global energy index represented by the local Green-function cache
+    integer :: iE_first = 1
     integer :: iEshift = 0
     !> rounded phonon energy actually used everywhere (iEshift*dE) [eV]
     real(dp) :: sh = 0.0_dp
@@ -164,6 +176,11 @@ module srh_multiphonon
     real(dp) :: fB = 0.0_dp
     real(dp) :: width = 0.0_dp
     real(dp), allocatable :: kw(:)
+#:if defined("MPI")
+    !> communicator over energy blocks and communicator over local k blocks
+    type(mpifx_comm) :: energy_comm
+    type(mpifx_comm) :: k_comm
+#:endif
 
     ! ---- derived: ladder (common) -----------------------------------------
     !> ladder shapes rescaled to max = 1
@@ -191,6 +208,9 @@ module srh_multiphonon
     procedure :: destroy_Sigma_n
     procedure :: destroy
     procedure :: set_EnGrid
+#:if defined("MPI")
+    procedure :: set_mpi_communicators
+#:endif
 
   end type TSrhMultiphonon
 
@@ -363,15 +383,13 @@ contains
     real(dp) :: sumw, x, Emax
 
     if (deltaE <= 0.0_dp) call error_msg('SRH defect: energy step must be > 0')
-    if (nE_local /= nE_global) &
-        & call error_msg('SRH defect: parallelization over the energy axis is not supported (use 1 energy rank)')
-    if (size(local_kindex) /= size(kweights)) &
-        & call error_msg('SRH defect: parallelization over k points is not supported (use 1 k rank)')
     if (this%n_sites < 1) call error_msg('SRH defect: no defect site registered')
 
     this%Emin = Emin
     this%dE = deltaE
     this%nE = nE_global
+    this%nE_local = nE_local
+    this%iE_first = 1
     Emax = Emin + real(nE_global - 1, dp) * deltaE
 
     ! one rounded phonon shift used for EVERYTHING (ladder energies,
@@ -431,6 +449,23 @@ contains
     end if
 
   end subroutine set_EnGrid
+
+#:if defined("MPI")
+  !--------------------------------------------------------------------------
+  !> Store the communicator topology and cache offset supplied by the NEGF
+  !! driver.  The k communicator combines weighted local-k contributions at a
+  !! fixed energy block; the energy communicator then distributes those blocks
+  !! to every rank required by the phonon ladder.
+  subroutine set_mpi_communicators(this, energy_comm, k_comm, iE_first)
+    class(TSrhMultiphonon), intent(inout) :: this
+    type(mpifx_comm), intent(in) :: energy_comm, k_comm
+    integer, intent(in) :: iE_first
+
+    this%energy_comm = energy_comm
+    this%k_comm = k_comm
+    this%iE_first = iE_first
+  end subroutine set_mpi_communicators
+#:endif
 
   !--------------------------------------------------------------------------
   !> Density of states prefactor of a parabolic band: N(E) = c sqrt(E_eV)
@@ -720,7 +755,7 @@ contains
     real(dp), intent(out) :: Gn_all(:,:), A_all(:,:)
     logical :: ok
 
-    integer :: nE, nK, iE, iK, s, io, cur_pl, pl, o1, o2
+    integer :: nE, nK, iE, iEg, iK, s, io, cur_pl, pl, o1, o2
     real(dp) :: wk
     type(TMatLabel) :: label
     type(z_dns), pointer :: pGn, pGr
@@ -740,13 +775,15 @@ contains
       return
     end select
 
-    if (nE /= this%nE) call error_msg('SRH defect: energy cache size differs from energy grid size')
+    if (nE /= this%nE_local) call error_msg('SRH defect: energy cache size differs from local energy grid')
     if (nK /= size(this%kw)) call error_msg('SRH defect: k-point cache size differs from k weights')
 
     label%spin = 1
     do iK = 1, nK
       label%kpoint = iK
       do iE = 1, nE
+        iEg = this%iE_first + iE - 1
+        if (iEg < 1 .or. iEg > this%nE) cycle
         label%energy_point = iE
         cur_pl = -1
         nullify(pGn)
@@ -770,7 +807,7 @@ contains
             if (allocated(pGn%val)) then
               if (o2 <= size(pGn%val, 1)) then
                 do io = o1, o2
-                  Gn_all(iE, s) = Gn_all(iE, s) + wk * real(pGn%val(io, io), dp)
+                  Gn_all(iEg, s) = Gn_all(iEg, s) + wk * real(pGn%val(io, io), dp)
                 end do
               end if
             end if
@@ -779,7 +816,7 @@ contains
             if (allocated(pGr%val)) then
               if (o2 <= size(pGr%val, 1)) then
                 do io = o1, o2
-                  A_all(iE, s) = A_all(iE, s) - 2.0_dp * wk * aimag(pGr%val(io, io))
+                  A_all(iEg, s) = A_all(iEg, s) - 2.0_dp * wk * aimag(pGr%val(io, io))
                 end do
               end if
             end if
@@ -787,6 +824,16 @@ contains
         end do
       end do
     end do
+#:if defined("MPI")
+    ! Each rank owns a local k subset and a contiguous energy block.  First
+    ! finish the k average at fixed energy, then make every energy block
+    ! available for the shifted multiphonon ladder.  This preserves the
+    ! globally normalized weights assigned in set_EnGrid.
+    call mpifx_allreduceip(this%k_comm, Gn_all, MPI_SUM)
+    call mpifx_allreduceip(this%k_comm, A_all, MPI_SUM)
+    call mpifx_allreduceip(this%energy_comm, Gn_all, MPI_SUM)
+    call mpifx_allreduceip(this%energy_comm, A_all, MPI_SUM)
+#:endif
     ok = .true.
 
   end function gather_local

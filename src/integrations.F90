@@ -2244,6 +2244,7 @@ contains
     type(TNegf) :: negf
 
     real(dp) :: deltaE
+    integer :: i, iE_first
     type(TInteractionNode), pointer :: it
     it => negf%interactList%first
 
@@ -2264,6 +2265,19 @@ contains
         deltaE = real(negf%en_grid(2)%Ec - negf%en_grid(1)%Ec)
         call pInter%set_EnGrid(real(negf%en_grid(1)%Ec), deltaE, size(negf%en_grid), &
             & negf%local_en_points, negf%kweights, negf%local_k_index)
+#:if defined("MPI")
+        ! The SRH interaction needs the global energy-index origin of its
+        ! local cache and both axes of the Cartesian communicator so that its
+        ! shifted phonon ladder can be formed from all E and k contributions.
+        iE_first = 1
+        do i = 1, size(negf%en_grid)
+          if (negf%en_grid(i)%cpu == id) then
+            iE_first = i
+            exit
+          end if
+        end do
+        call pInter%set_mpi_communicators(negf%energyComm, negf%kComm, iE_first)
+#:endif
       end select
       it => it%next
     end do
