@@ -997,7 +997,12 @@ contains
       this%sites(s)%Sn_b = 0.0_dp
       this%sites(s)%Sp_b = 0.0_dp
       do jj = this%sites(s)%jlo, this%sites(s)%jhi
-        aj = this%sites(s)%aline(jj - this%sites(s)%jlo + 1) / this%dE      ! A_d(E_j) [1/eV]
+        ! A_d(E_j) = i(G^R_d - G^A_d) = 2 pi delta(E-E_d) ([A] Eq. 7, [P] Eq. 1-2): the
+        ! spectral function integrates to 2 pi, not 1.  The defect-side sums (step 2) use
+        ! the normalised line (sum = 1) because the 2 pi cancels the 1/(2 pi hbar) of
+        ! Eq. 55/58; here the 2 pi must be explicit, otherwise Sigma_b is 2 pi too small
+        ! and band/defect rates do not balance.
+        aj = 2.0_dp * PI * this%sites(s)%aline(jj - this%sites(s)%jlo + 1) / this%dE      ! A_d(E_j) [1/eV]
         do l = 0, LMAX_RUNGS
           ie_up = jj + l * this%iEshift      ! E = E_j + l hw : conduction-type
           ie_dn = jj - l * this%iEshift      ! E = E_j - l hw : valence-type
