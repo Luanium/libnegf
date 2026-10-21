@@ -40,7 +40,8 @@
 !!       S^n_vd(E) = x_d sum_l Mp(l)             fd     A_d(E + l hw)       !
 !!       S^p_vd(E) = x_d sum_l Mp(l) e^{-b l hw} (1-fd) A_d(E + l hw)       !
 !!     with x_d = rho_d * cell_volume * weight (defects per orbital cell).  !
-!!     S^r = -(i/2)(S^n + S^p)   (anti-Hermitian part, level shift dropped) !
+!!     S^r(E) = Lambda(E) - (i/2)[S^n(E)+S^p(E)], where Lambda is the      !
+!!     principal-value (Kramers-Kronig) transform of the broadening.        !
 !!                                                                          !
 !! Storage: the band self-energies are DIAGONAL and independent of k, so    !
 !! only Sn_b(E), Sp_b(E) per site are stored (no dense PL blocks).          !
@@ -131,6 +132,8 @@ module srh_multiphonon
     !> band self-energies at the site orbitals as function of energy index [eV]
     real(dp), allocatable :: Sn_b(:)
     real(dp), allocatable :: Sp_b(:)
+    !> dispersive real part of the retarded band self-energy [eV]
+    real(dp), allocatable :: Sr_b(:)
   end type TSrhSite
 
   type, extends(TInelastic) :: TSrhMultiphonon
@@ -629,9 +632,11 @@ contains
     ! ---- storage and state --------------------------------------------------
     if (allocated(this%sites(s)%Sn_b)) deallocate(this%sites(s)%Sn_b)
     if (allocated(this%sites(s)%Sp_b)) deallocate(this%sites(s)%Sp_b)
-    allocate(this%sites(s)%Sn_b(this%nE), this%sites(s)%Sp_b(this%nE))
+    if (allocated(this%sites(s)%Sr_b)) deallocate(this%sites(s)%Sr_b)
+    allocate(this%sites(s)%Sn_b(this%nE), this%sites(s)%Sp_b(this%nE), this%sites(s)%Sr_b(this%nE))
     this%sites(s)%Sn_b = 0.0_dp
     this%sites(s)%Sp_b = 0.0_dp
+    this%sites(s)%Sr_b = 0.0_dp
     this%sites(s)%fd = 0.5_dp
     this%sites(s)%omfd = 0.5_dp
     this%sites(s)%R_def = 0.0_dp
@@ -647,26 +652,30 @@ contains
     ! single precision path is not used by TiberCAD (double precision caches)
   end subroutine add_sigma_r_sp
 
-  !> esh = E S - H - Sigma^r ; Sigma^r = -(i/2)(Sn_b + Sp_b) on the site rows
+  !> esh = E S - H - Sigma^r, with Sigma^r = Sr_b - (i/2)(Sn_b + Sp_b)
+  !! on the local site rows.
   subroutine add_sigma_r_dp(this, esh, en_index, k_index, spin)
     class(TSrhMultiphonon) :: this
     type(z_dns), dimension(:,:), intent(inout) :: esh
     integer, intent(in), optional :: en_index, k_index, spin
-    integer :: s, io, pl
-    real(dp) :: gam
+    integer :: s, io, pl, iEg
+    real(dp) :: gam, sr
 
     if (this%scba_iter .eq. 0) return
     if (.not. this%grid_ready) return
     if (.not. present(en_index)) return
-    if (en_index < 1 .or. en_index > this%nE) return
+    if (en_index < 1 .or. en_index > this%nE_local) return
+    iEg = this%iE_first + en_index - 1
+    if (iEg < 1 .or. iEg > this%nE) return
 
     do s = 1, this%n_sites
-      gam = this%sites(s)%Sn_b(en_index) + this%sites(s)%Sp_b(en_index)
-      if (gam <= 0.0_dp) cycle
+      gam = this%sites(s)%Sn_b(iEg) + this%sites(s)%Sp_b(iEg)
+      sr = this%sites(s)%Sr_b(iEg)
+      if (gam <= 0.0_dp .and. abs(sr) <= tiny(1.0_dp)) cycle
       pl = this%sites(s)%pl
       if (.not. allocated(esh(pl, pl)%val)) cycle
       do io = this%sites(s)%orb, this%sites(s)%orb + this%sites(s)%n_orb - 1
-        esh(pl, pl)%val(io, io) = esh(pl, pl)%val(io, io) + cmplx(0.0_dp, 0.5_dp * gam, dp)
+        esh(pl, pl)%val(io, io) = esh(pl, pl)%val(io, io) + cmplx(-sr, 0.5_dp * gam, dp)
       end do
     end do
 
@@ -683,19 +692,21 @@ contains
     class(TSrhMultiphonon) :: this
     type(z_dns), dimension(:,:), intent(inout) :: sigma
     integer, intent(in), optional :: en_index, k_index, spin
-    integer :: s, io, pl
+    integer :: s, io, pl, iEg
 
     if (this%scba_iter .eq. 0) return
     if (.not. this%grid_ready) return
     if (.not. present(en_index)) return
-    if (en_index < 1 .or. en_index > this%nE) return
+    if (en_index < 1 .or. en_index > this%nE_local) return
+    iEg = this%iE_first + en_index - 1
+    if (iEg < 1 .or. iEg > this%nE) return
 
     do s = 1, this%n_sites
-      if (this%sites(s)%Sn_b(en_index) <= 0.0_dp) cycle
+      if (this%sites(s)%Sn_b(iEg) <= 0.0_dp) cycle
       pl = this%sites(s)%pl
       if (.not. allocated(sigma(pl, pl)%val)) cycle
       do io = this%sites(s)%orb, this%sites(s)%orb + this%sites(s)%n_orb - 1
-        sigma(pl, pl)%val(io, io) = sigma(pl, pl)%val(io, io) + cmplx(this%sites(s)%Sn_b(en_index), 0.0_dp, dp)
+        sigma(pl, pl)%val(io, io) = sigma(pl, pl)%val(io, io) + cmplx(this%sites(s)%Sn_b(iEg), 0.0_dp, dp)
       end do
     end do
 
@@ -716,20 +727,22 @@ contains
     type(z_dns), intent(inout) :: sigma_n
     integer, intent(in) :: ii, jj
     integer, intent(in), optional :: en_index, k_index, spin
-    integer :: s, io
+    integer :: s, io, iEg
 
     if (this%scba_iter .eq. 0) return
     if (.not. this%grid_ready) return
     if (ii /= jj) return
     if (.not. present(en_index)) return
-    if (en_index < 1 .or. en_index > this%nE) return
+    if (en_index < 1 .or. en_index > this%nE_local) return
+    iEg = this%iE_first + en_index - 1
+    if (iEg < 1 .or. iEg > this%nE) return
     if (.not. allocated(sigma_n%val)) return
 
     do s = 1, this%n_sites
       if (this%sites(s)%pl /= ii) cycle
       do io = this%sites(s)%orb, this%sites(s)%orb + this%sites(s)%n_orb - 1
         if (io <= size(sigma_n%val, 1)) &
-            & sigma_n%val(io, io) = sigma_n%val(io, io) + cmplx(this%sites(s)%Sn_b(en_index), 0.0_dp, dp)
+            & sigma_n%val(io, io) = sigma_n%val(io, io) + cmplx(this%sites(s)%Sn_b(iEg), 0.0_dp, dp)
       end do
     end do
 
@@ -839,6 +852,36 @@ contains
   end function gather_local
 
   !--------------------------------------------------------------------------
+  !> Causal real part of a retarded self-energy from its broadening:
+  !!
+  !!   Lambda(E) = P integral dE' Gamma(E') / [2 pi (E-E')].
+  !!
+  !! Gamma is represented as constant inside every uniform energy cell.  The
+  !! analytical cell integral avoids the singular grid-point contribution and
+  !! is considerably more accurate than omitting j=i from a point sum.  The
+  !! finite simulation window is the same approximation already made for all
+  !! energy-domain NEGF quantities; contributions outside it are unavailable.
+  subroutine causal_realpart(gamma, lambda)
+    real(dp), intent(in) :: gamma(:)
+    real(dp), intent(out) :: lambda(:)
+
+    integer :: i, j, n
+    real(dp) :: xplus, xminus
+
+    n = size(gamma)
+    if (size(lambda) /= n) call error_msg('SRH defect: causal self-energy array size mismatch')
+    lambda = 0.0_dp
+    do i = 1, n
+      do j = 1, n
+        if (j == i .or. gamma(j) <= 0.0_dp) cycle
+        xplus = real(i - j, dp) + 0.5_dp
+        xminus = real(i - j, dp) - 0.5_dp
+        lambda(i) = lambda(i) + gamma(j) * log(abs(xplus / xminus)) / (2.0_dp * PI)
+      end do
+    end do
+  end subroutine causal_realpart
+
+  !--------------------------------------------------------------------------
   !> Steps 1-5 of the module header for every site.  Called once per SCBA iteration.
   subroutine compute_Sigma_n(this, en_index, k_index, spin)
     class(TSrhMultiphonon) :: this
@@ -940,6 +983,9 @@ contains
           end if
         end do
       end do
+      ! Retarded and lesser/greater components must describe the same causal
+      ! interaction.  Recover the principal-value part from Gamma=Sn+Sp.
+      call causal_realpart(this%sites(s)%Sn_b + this%sites(s)%Sp_b, this%sites(s)%Sr_b)
     end do
 
     if (id0) then
@@ -965,10 +1011,9 @@ contains
   end subroutine compute_Sigma_n
 
   !--------------------------------------------------------------------------
-  !> Sigma^r = -(i/2) (Sigma^n + Sigma^p) is built on the fly in add_sigma_r_dp
-  !! from the stored Sn_b, Sp_b of the same SCBA iteration (anti-Hermitian part
-  !! fixed by the same lifetime broadening as the lesser/greater parts, i.e.
-  !! current conservation; the real part, a level shift, is neglected).
+  !> Sigma^r is built on the fly in add_sigma_r_dp from the causal real part
+  !! and anti-Hermitian broadening prepared with the same lesser/greater
+  !! self-energies in compute_Sigma_n.
   subroutine compute_Sigma_r(this, en_index, k_index, spin)
     class(TSrhMultiphonon) :: this
     integer, intent(in), optional :: en_index, k_index, spin
