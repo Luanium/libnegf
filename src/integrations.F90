@@ -1704,8 +1704,9 @@ contains
     ! Contiguous energy blocks + local pt_cpu are required whenever any
     ! interaction is registered (SCBA caches G_r/G_n with local energy index).
     ! Round-robin is only valid for pure coherent transport (no interactions).
-    ! Previously only max_wq>0 triggered contiguous mode; SRH has wq=0 so it
-    ! fell into round-robin with unset pt_cpu → "energy_point out of range".
+    ! Every registered interaction needs a contiguous local cache.  SRH also
+    ! advertises its phonon energy through wq, but the interaction-count test
+    ! keeps this cache invariant independent of a model's energy shift.
     if (negf%interactList%counter == 0) then
       ! distribute energy grid round robin scheme
       !     0 1 2 3 ... 0 1 2 .... 0 1 2 ....

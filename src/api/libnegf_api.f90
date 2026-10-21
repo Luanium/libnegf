@@ -1619,6 +1619,44 @@ subroutine negf_get_srh_spectral(handler, isite, nE_max, nE, Emin, dE, Sn_arr, S
 end subroutine negf_get_srh_spectral
 
 
+!> Dispersive real part Sr_b(E) of the causal SRH retarded self-energy.
+!! Two-step use mirrors negf_get_srh_spectral: nE_max=0 queries the grid,
+!! then nE_max>=nE fills Sr_arr[1..nE].
+subroutine negf_get_srh_retarded_spectral(handler, isite, nE_max, nE, Emin, dE, Sr_arr, ierr) bind(c)
+  use iso_c_binding, only : c_int, c_double ! if:mod:use
+  use libnegfAPICommon  ! if:mod:use
+  use libnegf   ! if:mod:use
+  use ln_precision      ! if:mod:use
+  use lib_param      ! if:mod:use
+  implicit none
+  integer(c_int) :: handler(DAC_handlerSize)  ! if:var:in
+  integer(c_int), intent(in), value :: isite ! if:var:in
+  integer(c_int), intent(in), value :: nE_max ! if:var:in
+  integer(c_int), intent(out) :: nE ! if:var:out
+  real(c_double), intent(out) :: Emin ! if:var:out
+  real(c_double), intent(out) :: dE ! if:var:out
+  real(c_double), intent(out) :: Sr_arr(*) ! if:var:out
+  integer(c_int), intent(out) :: ierr ! if:var:out
+
+  type(NEGFpointers) :: LIB
+  integer :: nE_loc, ierr_loc
+  real(dp) :: Emin_loc, dE_loc
+  real(dp), allocatable :: Sr_tmp(:)
+
+  LIB = transfer(handler, LIB)
+  allocate(Sr_tmp(max(nE_max, 1)))
+  call get_srh_retarded_spectral(LIB%pNEGF, isite, max(nE_max, 0), nE_loc, Emin_loc, dE_loc, Sr_tmp, ierr_loc)
+
+  nE = nE_loc
+  Emin = Emin_loc
+  dE = dE_loc
+  ierr = ierr_loc
+  if (ierr_loc == 0 .and. nE_max >= nE_loc .and. nE_loc > 0) Sr_arr(1:nE_loc) = Sr_tmp(1:nE_loc)
+  deallocate(Sr_tmp)
+
+end subroutine negf_get_srh_retarded_spectral
+
+
 !!> Drop all registered interactions (elastic + inelastic + SRH).
 !! Call before re-setup on a Poisson–NEGF iteration so sites and self-energies are not stacked.
 !! @param [in] handler: handler Number for the LIBNEGF instance

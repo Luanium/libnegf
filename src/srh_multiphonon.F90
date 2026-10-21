@@ -197,6 +197,7 @@ module srh_multiphonon
     procedure :: add_site
     procedure :: get_site_results
     procedure :: get_site_spectral
+    procedure :: get_site_retarded_spectral
     procedure :: add_sigma_r_sp
     procedure :: add_sigma_r_dp
     procedure :: add_sigma_n_sp
@@ -370,6 +371,38 @@ contains
     ok = .true.
 
   end subroutine get_site_spectral
+
+  !--------------------------------------------------------------------------
+  !> Dispersive real component Sr_b(E) [eV] of the causal retarded band
+  !! self-energy for one site.  The complete retarded component is
+  !! Sigma^r_b = Sr_b - i (Sn_b + Sp_b)/2.
+  subroutine get_site_retarded_spectral(this, isite, nE_out, Emin, dE, Sr, ok)
+    class(TSrhMultiphonon), intent(in) :: this
+    integer, intent(in) :: isite
+    integer, intent(out) :: nE_out
+    real(dp), intent(out) :: Emin, dE
+    real(dp), intent(out) :: Sr(*)
+    logical, intent(out) :: ok
+
+    integer :: n, i
+
+    nE_out = 0
+    Emin = 0.0_dp
+    dE = 0.0_dp
+    ok = .false.
+    if (isite < 1 .or. isite > this%n_sites) return
+    if (.not. allocated(this%sites(isite)%Sr_b)) return
+    n = size(this%sites(isite)%Sr_b)
+    if (n < 1) return
+    nE_out = n
+    Emin = this%Emin
+    dE = this%dE
+    do i = 1, n
+      Sr(i) = this%sites(isite)%Sr_b(i)
+    end do
+    ok = .true.
+
+  end subroutine get_site_retarded_spectral
 
   !--------------------------------------------------------------------------
   !> Called by libNEGF before the SCBA loop. Builds everything that depends on

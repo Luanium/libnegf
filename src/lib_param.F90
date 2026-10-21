@@ -62,6 +62,7 @@ module lib_param
   public :: get_srh_nsites
   public :: get_srh_results
   public :: get_srh_spectral
+  public :: get_srh_retarded_spectral
   integer, public, parameter :: MAXNCONT=10
   integer, public, parameter :: MAXNLAYERS=10000
 
@@ -744,6 +745,64 @@ contains
     end do
 
   end subroutine get_srh_spectral
+
+
+  !> Dispersive real part Sr_b(E) [eV] for global SRH site isite (1-based).
+  !! The complete causal retarded self-energy is
+  !! Sigma^r_b = Sr_b - i (Sn_b + Sp_b)/2.  Use nE_max=0 for a size query.
+  subroutine get_srh_retarded_spectral(negf, isite, nE_max, nE, Emin, dE, Sr, ierr)
+    type(Tnegf), intent(in) :: negf
+    integer, intent(in) :: isite, nE_max
+    integer, intent(out) :: nE, ierr
+    real(dp), intent(out) :: Emin, dE
+    real(dp), intent(out) :: Sr(*)
+
+    type(TInteractionNode), pointer :: it
+    integer :: offset, nE_loc
+    real(dp) :: Emin_loc, dE_loc
+    logical :: ok
+    real(dp), allocatable :: Sr_tmp(:)
+
+    nE = 0
+    Emin = 0.0_dp
+    dE = 0.0_dp
+    ierr = 1
+    offset = 0
+    it => negf%interactList%first
+    do while (associated(it))
+      select type(pInter => it%inter)
+      type is(TSrhMultiphonon)
+        if (isite > offset .and. isite <= offset + pInter%n_sites) then
+          allocate(Sr_tmp(max(pInter%nE, 1)))
+          call pInter%get_site_retarded_spectral(isite - offset, nE_loc, Emin_loc, dE_loc, Sr_tmp, ok)
+          if (.not. ok .or. nE_loc < 1) then
+            deallocate(Sr_tmp)
+            return
+          end if
+          nE = nE_loc
+          Emin = Emin_loc
+          dE = dE_loc
+          if (nE_max == 0) then
+            deallocate(Sr_tmp)
+            ierr = 0
+            return
+          end if
+          if (nE_max < nE_loc) then
+            ierr = 2
+            deallocate(Sr_tmp)
+            return
+          end if
+          Sr(1:nE_loc) = Sr_tmp(1:nE_loc)
+          deallocate(Sr_tmp)
+          ierr = 0
+          return
+        end if
+        offset = offset + pInter%n_sites
+      end select
+      it => it%next
+    end do
+
+  end subroutine get_srh_retarded_spectral
 
 
   !> clean interactions objects
