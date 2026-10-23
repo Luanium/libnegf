@@ -132,6 +132,16 @@ module srh_multiphonon
     !> band self-energies at the site orbitals as function of energy index [eV]
     real(dp), allocatable :: Sn_b(:)
     real(dp), allocatable :: Sp_b(:)
+    !> conduction-ladder part only of Sn_b, Sp_b (valence part = total - this);
+    !! needed to split the band-side flux into its CB and VB contributions
+    real(dp), allocatable :: Sn_bc(:)
+    real(dp), allocatable :: Sp_bc(:)
+    !> band-side net electron flux per defect, from the stored band self-energies
+    !! and the current G: rb_c = CB -> defect, rb_v = VB -> defect [1/s]
+    real(dp) :: rb_c = 0.0_dp
+    real(dp) :: rb_v = 0.0_dp
+    !> |rb_c - Rc|, |rb_v + Rv| relative to the gross flux (consistency residual)
+    real(dp) :: res_band = 0.0_dp
     !> dispersive real part of the retarded band self-energy [eV]
     real(dp), allocatable :: Sr_b(:)
   end type TSrhSite
@@ -667,6 +677,14 @@ contains
     if (allocated(this%sites(s)%Sp_b)) deallocate(this%sites(s)%Sp_b)
     if (allocated(this%sites(s)%Sr_b)) deallocate(this%sites(s)%Sr_b)
     allocate(this%sites(s)%Sn_b(this%nE), this%sites(s)%Sp_b(this%nE), this%sites(s)%Sr_b(this%nE))
+    if (allocated(this%sites(s)%Sn_bc)) deallocate(this%sites(s)%Sn_bc)
+    if (allocated(this%sites(s)%Sp_bc)) deallocate(this%sites(s)%Sp_bc)
+    allocate(this%sites(s)%Sn_bc(this%nE), this%sites(s)%Sp_bc(this%nE))
+    this%sites(s)%Sn_bc = 0.0_dp
+    this%sites(s)%Sp_bc = 0.0_dp
+    this%sites(s)%rb_c = 0.0_dp
+    this%sites(s)%rb_v = 0.0_dp
+    this%sites(s)%res_band = 0.0_dp
     this%sites(s)%Sn_b = 0.0_dp
     this%sites(s)%Sp_b = 0.0_dp
     this%sites(s)%Sr_b = 0.0_dp
@@ -923,6 +941,9 @@ contains
     integer :: nE, ns, s, jj, l, ie_up, ie_dn
     real(dp), allocatable :: Gn_all(:,:), A_all(:,:), Gn_loc(:), Gp_loc(:)
     real(dp) :: aj, gam, xd, Rc, Rv, gross, bal, bal_max
+    real(dp) :: sum_c, sum_v, res_max, rb_scale
+    integer :: ie, n_res
+    logical :: has_prev
     real(dp) :: fd_min, fd_max, U_min, U_max
 
     if (.not. this%grid_ready) return
@@ -937,6 +958,8 @@ contains
     end if
 
     bal_max = 0.0_dp
+    res_max = 0.0_dp
+    n_res = 0
 
     do s = 1, ns
       ! G^n >= 0 and G^p = A - G^n >= 0 (numerical noise clipped)
@@ -994,8 +1017,38 @@ contains
 
       ! ---- step 5: band self-energies from the defect Green's function ------
       xd = this%rho_d * this%cell_vol * this%sites(s)%weight      ! defects per orbital cell
+
+      ! ---- SCBA / conservation check: OLD band self-energies x NEW G -----------
+      ! Net electron loss of the bands per defect, (1/(2 pi hbar x_d)) int dE [Sp Gn - Sn Gp],
+      ! evaluated with the band self-energies stored from the previous iteration and
+      ! the G just returned by the NEGF solve (which already contains them).
+      !   rb_c : conduction band -> defect, rb_v : defect -> valence band.
+      ! At the SCBA fixed point they equal the defect-side rates Rc, Rv computed above
+      ! from the same G.  Their difference is therefore a real convergence/consistency
+      ! measure: it tests that the band self-energies (2 pi, x_d, ladder directions,
+      ! Boltzmann factors) really enter G and reproduce the defect balance.
+      has_prev = any(this%sites(s)%Sn_b > 0.0_dp .or. this%sites(s)%Sp_b > 0.0_dp)
+      this%sites(s)%rb_c = 0.0_dp
+      this%sites(s)%rb_v = 0.0_dp
+      if (has_prev .and. xd > 0.0_dp) then
+        sum_c = 0.0_dp
+        sum_v = 0.0_dp
+        do ie = 1, nE
+          sum_c = sum_c + this%sites(s)%Sp_bc(ie) * Gn_loc(ie) - this%sites(s)%Sn_bc(ie) * Gp_loc(ie)
+          sum_v = sum_v + (this%sites(s)%Sn_b(ie) - this%sites(s)%Sn_bc(ie)) * Gp_loc(ie) &
+              & - (this%sites(s)%Sp_b(ie) - this%sites(s)%Sp_bc(ie)) * Gn_loc(ie)
+        end do
+        rb_scale = this%dE / (2.0_dp * PI * HBAR_EV_S * xd)
+        this%sites(s)%rb_c = sum_c * rb_scale
+        this%sites(s)%rb_v = sum_v * rb_scale
+      else
+        has_prev = .false.
+      end if
+
       this%sites(s)%Sn_b = 0.0_dp
       this%sites(s)%Sp_b = 0.0_dp
+      this%sites(s)%Sn_bc = 0.0_dp
+      this%sites(s)%Sp_bc = 0.0_dp
       do jj = this%sites(s)%jlo, this%sites(s)%jhi
         ! A_d(E_j) = i(G^R_d - G^A_d) = 2 pi delta(E-E_d) ([A] Eq. 7, [P] Eq. 1-2): the
         ! spectral function integrates to 2 pi, not 1.  The defect-side sums (step 2) use
@@ -1012,6 +1065,10 @@ contains
                 & + xd * this%sites(s)%Mn(l) * this%bolt(l) * this%sites(s)%fd * aj
             this%sites(s)%Sp_b(ie_up) = this%sites(s)%Sp_b(ie_up) &
                 & + xd * this%sites(s)%Mn(l) * this%sites(s)%omfd * aj
+            this%sites(s)%Sn_bc(ie_up) = this%sites(s)%Sn_bc(ie_up) &
+                & + xd * this%sites(s)%Mn(l) * this%bolt(l) * this%sites(s)%fd * aj
+            this%sites(s)%Sp_bc(ie_up) = this%sites(s)%Sp_bc(ie_up) &
+                & + xd * this%sites(s)%Mn(l) * this%sites(s)%omfd * aj
           end if
           if (ie_dn >= 1) then
             this%sites(s)%Sn_b(ie_dn) = this%sites(s)%Sn_b(ie_dn) &
@@ -1024,6 +1081,16 @@ contains
       ! Retarded and lesser/greater components must describe the same causal
       ! interaction.  Recover the principal-value part from Gamma=Sn+Sp.
       call causal_realpart(this%sites(s)%Sn_b + this%sites(s)%Sp_b, this%sites(s)%Sr_b)
+
+      if (has_prev) then
+        if (gross > 0.0_dp) then
+          this%sites(s)%res_band = max(abs(this%sites(s)%rb_c - Rc), abs(this%sites(s)%rb_v - Rv)) / gross
+        else
+          this%sites(s)%res_band = 0.0_dp
+        end if
+        res_max = max(res_max, this%sites(s)%res_band)
+        n_res = n_res + 1
+      end if
     end do
 
     if (id0) then
@@ -1042,6 +1109,11 @@ contains
             & ', ', ns, ' sites): fd in [', fd_min, ',', fd_max, ']  U[cm-3 s-1] in [', U_min, ',', U_max
       end if
       write(*,'(A,ES9.2)') '   max |Rc-Rv|/gross over sites = ', bal_max
+      if (n_res > 0) then
+        write(*,'(A,ES9.2)') '   SCBA band/defect flux residual |rb(old Sigma_b)-R(new G)|/gross, max over sites = ', res_max
+      else
+        write(*,'(A)') '   SCBA band/defect flux residual: n/a (first iteration, no previous Sigma_b)'
+      end if
     end if
 
     deallocate(Gn_all, A_all, Gn_loc, Gp_loc)
