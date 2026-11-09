@@ -30,6 +30,7 @@ set(test-directories
     f90Si_nin
     f90Si_nin_40pl
     f90defect_types
+    f90defect_kernel
 )
 
 if(WITH_TRANSPORT_GPU)

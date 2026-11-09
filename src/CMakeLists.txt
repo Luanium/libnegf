@@ -34,6 +34,7 @@ set(sources-fpp
     elphinel.F90
     self_energy.F90
     ln_defect_types.F90
+    ln_defect_kernel.F90
     scba.F90
     sparskit/skit_blassm.F90
     sparskit/skit_formats.F90
