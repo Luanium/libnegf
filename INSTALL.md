@@ -24,7 +24,7 @@ cmake .. -LAH
 If you want to build also the tests, enable the `BUILD_TESTING` option:
 
 ```
-cmake .. -DBUILD_TESTING=TRUE
+cmake .. -DBUILD_TESTING=TRUE -DTEST_NUM_PROCS=4
 make && make test
 ```
 
