@@ -404,3 +404,129 @@ class NEGF:
         self._lib.negf_print_tnegf.argtypes = [self._href_type]
         self._lib.negf_print_tnegf(self._href)
       
+
+    def set_defect_srh_mpr(self, pl_indices, orb_start, orb_end, eps_d,
+                           density_weight, kbt, hbar_omega0, s_n, s_p,
+                           m0_dc, m0_dv, n_modes, ec_cut, ev_cut, mode=0):
+        """Configure SRH defect ensemble using the MPR kernel.
+
+        Args:
+            pl_indices (int array): principal-layer index per defect
+            orb_start (int array): first orbital index per defect
+            orb_end (int array): last orbital index per defect
+            eps_d (float array): defect energy level per defect (eV)
+            density_weight (float array): defect density weight per defect
+            kbt (float): thermal energy k_B T (eV)
+            hbar_omega0 (float): phonon energy (eV)
+            s_n (float): Huang-Rhys factor for electrons
+            s_p (float): Huang-Rhys factor for holes
+            m0_dc (float): CB coupling prefactor
+            m0_dv (float): VB coupling prefactor
+            n_modes (int): number of vibronic modes
+            ec_cut (float array): CB cut-off energy per defect (eV)
+            ev_cut (float array): VB cut-off energy per defect (eV)
+            mode (int): 0=DEFECT_MODE_DELTA, 1=DEFECT_MODE_DYSON
+        """
+        num_defects = len(pl_indices)
+        self._lib.negf_set_defect_srh_mpr.argtypes = [
+            self._href_type,
+            c_int,
+            ndpointer(c_int),
+            ndpointer(c_int),
+            ndpointer(c_int),
+            ndpointer(c_double),
+            ndpointer(c_double),
+            c_double,
+            c_double,
+            c_double,
+            c_double,
+            c_double,
+            c_double,
+            c_int,
+            ndpointer(c_double),
+            ndpointer(c_double),
+            c_int,
+        ]
+        self._lib.negf_set_defect_srh_mpr(
+            self._href,
+            c_int(num_defects),
+            np.array(pl_indices, dtype=INTTYPE),
+            np.array(orb_start, dtype=INTTYPE),
+            np.array(orb_end, dtype=INTTYPE),
+            np.array(eps_d, dtype=REALTYPE),
+            np.array(density_weight, dtype=REALTYPE),
+            c_double(kbt),
+            c_double(hbar_omega0),
+            c_double(s_n),
+            c_double(s_p),
+            c_double(m0_dc),
+            c_double(m0_dv),
+            c_int(n_modes),
+            np.array(ec_cut, dtype=REALTYPE),
+            np.array(ev_cut, dtype=REALTYPE),
+            c_int(mode),
+        )
+
+    def get_defect_srh_rates(self, num_defects):
+        """Read SRH recombination rates after the SCBA loop.
+
+        Args:
+            num_defects (int): number of defect centres
+
+        Returns:
+            tuple: (f_occ, rate_net_el, rate_net_hl, total_recomb_rate)
+                   where each array has length num_defects and total is scalar
+        """
+        f_occ = np.zeros(num_defects, dtype=REALTYPE)
+        rate_net_el = np.zeros(num_defects, dtype=REALTYPE)
+        rate_net_hl = np.zeros(num_defects, dtype=REALTYPE)
+        total_recomb_rate = c_double(0.0)
+        self._lib.negf_get_defect_srh_rates.argtypes = [
+            self._href_type,
+            c_int,
+            ndpointer(c_double),
+            ndpointer(c_double),
+            ndpointer(c_double),
+            POINTER(c_double),
+        ]
+        self._lib.negf_get_defect_srh_rates(
+            self._href,
+            c_int(num_defects),
+            f_occ,
+            rate_net_el,
+            rate_net_hl,
+            byref(total_recomb_rate),
+        )
+        return f_occ, rate_net_el, rate_net_hl, total_recomb_rate.value
+
+    def get_band_resolved_pl_currents(self, e_split):
+        """Get band-resolved inter-PL currents (continuity mode).
+
+        Args:
+            e_split (float array): CB/VB split energy per boundary (eV),
+                                   size n_bnd = num_PLs - 1
+
+        Returns:
+            tuple: (j_el_pl, j_hl_pl, j_tot_pl) each of size n_bnd
+        """
+        n_bnd = len(e_split)
+        j_el_pl = np.zeros(n_bnd, dtype=REALTYPE)
+        j_hl_pl = np.zeros(n_bnd, dtype=REALTYPE)
+        j_tot_pl = np.zeros(n_bnd, dtype=REALTYPE)
+        self._lib.negf_get_band_resolved_pl_currents.argtypes = [
+            self._href_type,
+            c_int,
+            ndpointer(c_double),
+            ndpointer(c_double),
+            ndpointer(c_double),
+            ndpointer(c_double),
+        ]
+        self._lib.negf_get_band_resolved_pl_currents(
+            self._href,
+            c_int(n_bnd),
+            np.array(e_split, dtype=REALTYPE),
+            j_el_pl,
+            j_hl_pl,
+            j_tot_pl,
+        )
+        return j_el_pl, j_hl_pl, j_tot_pl

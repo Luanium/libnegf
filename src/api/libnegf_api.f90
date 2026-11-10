@@ -1474,3 +1474,183 @@ subroutine negf_mem_stats(handler) bind(c)
 
 end subroutine negf_mem_stats
 
+
+!> Configure SRH defect ensemble using the MPR (multiphonon relaxation) kernel.
+!! @param[in] handler     Handler for the libnegf instance
+!! @param[in] num_defects Number of defect centres
+!! @param[in] pl_indices  Principal-layer index per defect, size num_defects
+!! @param[in] orb_start   First orbital index per defect, size num_defects
+!! @param[in] orb_end     Last orbital index per defect, size num_defects
+!! @param[in] eps_d       Defect energy level per defect (eV), size num_defects
+!! @param[in] density_weight  Defect density weight per defect, size num_defects
+!! @param[in] kbt         Thermal energy k_B T (eV)
+!! @param[in] hbar_omega0 Phonon energy (eV)
+!! @param[in] s_n         Huang-Rhys factor for electrons
+!! @param[in] s_p         Huang-Rhys factor for holes
+!! @param[in] m0_dc       CB coupling prefactor
+!! @param[in] m0_dv       VB coupling prefactor
+!! @param[in] n_modes     Number of vibronic modes
+!! @param[in] ec_cut      CB cut-off energy per defect (eV), size num_defects
+!! @param[in] ev_cut      VB cut-off energy per defect (eV), size num_defects
+!! @param[in] mode        0=DEFECT_MODE_DELTA, 1=DEFECT_MODE_DYSON
+subroutine negf_set_defect_srh_mpr(handler, num_defects, pl_indices, &
+    & orb_start, orb_end, eps_d, density_weight, kbt, hbar_omega0, &
+    & s_n, s_p, m0_dc, m0_dv, n_modes, ec_cut, ev_cut, mode) &
+    & bind(c, name='negf_set_defect_srh_mpr')
+  use iso_c_binding, only : c_int, c_double !if:mod:use
+  use libnegfAPICommon !if:mod:use
+  use libnegf !if:mod:use
+  implicit none
+  integer(c_int), intent(in) :: handler(DAC_handlerSize) !if:var:in
+  integer(c_int), intent(in), value :: num_defects !if:var:in
+  integer(c_int), intent(in) :: pl_indices(num_defects) !if:var:in
+  integer(c_int), intent(in) :: orb_start(num_defects) !if:var:in
+  integer(c_int), intent(in) :: orb_end(num_defects) !if:var:in
+  real(c_double), intent(in) :: eps_d(num_defects) !if:var:in
+  real(c_double), intent(in) :: density_weight(num_defects) !if:var:in
+  real(c_double), intent(in), value :: kbt !if:var:in
+  real(c_double), intent(in), value :: hbar_omega0 !if:var:in
+  real(c_double), intent(in), value :: s_n !if:var:in
+  real(c_double), intent(in), value :: s_p !if:var:in
+  real(c_double), intent(in), value :: m0_dc !if:var:in
+  real(c_double), intent(in), value :: m0_dv !if:var:in
+  integer(c_int), intent(in), value :: n_modes !if:var:in
+  real(c_double), intent(in) :: ec_cut(num_defects) !if:var:in
+  real(c_double), intent(in) :: ev_cut(num_defects) !if:var:in
+  integer(c_int), intent(in), value :: mode !if:var:in
+
+  type(NEGFpointers) :: LIB
+  integer, allocatable :: pl_idx(:), os(:), oe(:)
+  real(c_double), allocatable :: epsd(:), dw(:), ecc(:), evc(:)
+  integer :: nu
+
+  LIB = transfer(handler, LIB)
+
+  allocate(pl_idx(num_defects))
+  allocate(os(num_defects))
+  allocate(oe(num_defects))
+  allocate(epsd(num_defects))
+  allocate(dw(num_defects))
+  allocate(ecc(num_defects))
+  allocate(evc(num_defects))
+  do nu = 1, num_defects
+    pl_idx(nu) = int(pl_indices(nu))
+    os(nu) = int(orb_start(nu))
+    oe(nu) = int(orb_end(nu))
+    epsd(nu) = real(eps_d(nu), kind(epsd(nu)))
+    dw(nu) = real(density_weight(nu), kind(dw(nu)))
+    ecc(nu) = real(ec_cut(nu), kind(ecc(nu)))
+    evc(nu) = real(ev_cut(nu), kind(evc(nu)))
+  end do
+
+  call set_defect_srh_mpr(LIB%pNEGF, num_defects, pl_idx, os, oe, &
+      & epsd, dw, real(kbt, kind(epsd(1))), real(hbar_omega0, kind(epsd(1))), &
+      & real(s_n, kind(epsd(1))), real(s_p, kind(epsd(1))), &
+      & real(m0_dc, kind(epsd(1))), real(m0_dv, kind(epsd(1))), &
+      & int(n_modes), ecc, evc, int(mode))
+
+  deallocate(pl_idx, os, oe, epsd, dw, ecc, evc)
+
+end subroutine negf_set_defect_srh_mpr
+
+
+!> Read out SRH recombination rates after the SCBA loop.
+!! @param[in]  handler              Handler for the libnegf instance
+!! @param[in]  num_defects          Number of defect centres
+!! @param[out] f_occ_out            Defect occupancy per defect, size num_defects
+!! @param[out] rate_net_el_out      Net electron rate per defect, size num_defects
+!! @param[out] rate_net_hl_out      Net hole rate per defect, size num_defects
+!! @param[out] total_recomb_rate_out  Total recombination rate (scalar)
+subroutine negf_get_defect_srh_rates(handler, num_defects, f_occ_out, &
+    & rate_net_el_out, rate_net_hl_out, total_recomb_rate_out) &
+    & bind(c, name='negf_get_defect_srh_rates')
+  use iso_c_binding, only : c_int, c_double !if:mod:use
+  use libnegfAPICommon !if:mod:use
+  use libnegf !if:mod:use
+  implicit none
+  integer(c_int), intent(in) :: handler(DAC_handlerSize) !if:var:in
+  integer(c_int), intent(in), value :: num_defects !if:var:in
+  real(c_double), intent(out) :: f_occ_out(num_defects) !if:var:out
+  real(c_double), intent(out) :: rate_net_el_out(num_defects) !if:var:out
+  real(c_double), intent(out) :: rate_net_hl_out(num_defects) !if:var:out
+  real(c_double), intent(out) :: total_recomb_rate_out !if:var:out
+
+  type(NEGFpointers) :: LIB
+  real(kind(f_occ_out(1))), allocatable :: f_tmp(:), rel_tmp(:), rhl_tmp(:)
+  real(kind(f_occ_out(1))), allocatable :: pl_tmp(:)
+  real(kind(total_recomb_rate_out)) :: tot_tmp
+  integer :: nu, npl
+
+  LIB = transfer(handler, LIB)
+  npl = LIB%pNEGF%defect_srh%num_defects
+  if (allocated(LIB%pNEGF%defect_srh%pl_recomb_rate)) then
+    npl = size(LIB%pNEGF%defect_srh%pl_recomb_rate)
+  else
+    npl = 1
+  end if
+  allocate(f_tmp(num_defects))
+  allocate(rel_tmp(num_defects))
+  allocate(rhl_tmp(num_defects))
+  allocate(pl_tmp(max(npl, 1)))
+
+  call get_defect_srh_rates(LIB%pNEGF, f_tmp, rel_tmp, rhl_tmp, &
+      & pl_tmp, tot_tmp)
+
+  do nu = 1, num_defects
+    f_occ_out(nu)       = f_tmp(nu)
+    rate_net_el_out(nu) = rel_tmp(nu)
+    rate_net_hl_out(nu) = rhl_tmp(nu)
+  end do
+  total_recomb_rate_out = tot_tmp
+
+  deallocate(f_tmp, rel_tmp, rhl_tmp, pl_tmp)
+
+end subroutine negf_get_defect_srh_rates
+
+
+!> Get band-resolved inter-PL currents (continuity mode) from converged SRH rates.
+!! @param[in]  handler  Handler for the libnegf instance
+!! @param[in]  n_bnd    Number of inter-PL boundaries
+!! @param[in]  e_split  CB/VB split energy per boundary (eV), size n_bnd
+!! @param[out] j_el_pl  Electron current per boundary, size n_bnd
+!! @param[out] j_hl_pl  Hole current per boundary, size n_bnd
+!! @param[out] j_tot_pl Total current per boundary, size n_bnd
+subroutine negf_get_band_resolved_pl_currents(handler, n_bnd, e_split, &
+    & j_el_pl, j_hl_pl, j_tot_pl) &
+    & bind(c, name='negf_get_band_resolved_pl_currents')
+  use iso_c_binding, only : c_int, c_double !if:mod:use
+  use libnegfAPICommon !if:mod:use
+  use libnegf !if:mod:use
+  implicit none
+  integer(c_int), intent(in) :: handler(DAC_handlerSize) !if:var:in
+  integer(c_int), intent(in), value :: n_bnd !if:var:in
+  real(c_double), intent(in) :: e_split(n_bnd) !if:var:in
+  real(c_double), intent(out) :: j_el_pl(n_bnd) !if:var:out
+  real(c_double), intent(out) :: j_hl_pl(n_bnd) !if:var:out
+  real(c_double), intent(out) :: j_tot_pl(n_bnd) !if:var:out
+
+  type(NEGFpointers) :: LIB
+  real(kind(e_split(1))), allocatable :: es(:), jel(:), jhl(:), jtot(:)
+  integer :: l
+
+  LIB = transfer(handler, LIB)
+
+  allocate(es(n_bnd))
+  allocate(jel(n_bnd))
+  allocate(jhl(n_bnd))
+  allocate(jtot(n_bnd))
+  do l = 1, n_bnd
+    es(l) = real(e_split(l), kind(es(l)))
+  end do
+
+  call get_band_resolved_pl_currents(LIB%pNEGF, es, jel, jhl, jtot)
+
+  do l = 1, n_bnd
+    j_el_pl(l)  = jel(l)
+    j_hl_pl(l)  = jhl(l)
+    j_tot_pl(l) = jtot(l)
+  end do
+
+  deallocate(es, jel, jhl, jtot)
+
+end subroutine negf_get_band_resolved_pl_currents
