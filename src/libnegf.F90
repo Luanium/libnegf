@@ -41,6 +41,10 @@ module libnegf
  use ln_enums, only : interaction_models, integration_type
  use interactions, only : get_max_wq
  use equiv_kpoints
+ use ln_defect_types, only : TDefectEnsemble, destruct_defect_ensemble, &
+     & DEFECT_MODE_DELTA, DEFECT_MODE_DYSON, &
+     & init_defect_ensemble, init_defect_spec
+ use ln_defect_kernel, only : build_mpr_kernel
 #:if defined("MPI")
  use libmpifx_module
 #:endif
@@ -124,6 +128,10 @@ module libnegf
                                     ! compute phonon transmission
                                     ! and heat currents
  public :: thermal_conductance
+
+ public :: set_defect_srh_mpr   ! Configure SRH defect ensemble (MPR kernel)
+ public :: get_defect_srh_rates ! Read out SRH recombination rates
+ public :: DEFECT_MODE_DELTA, DEFECT_MODE_DYSON ! SRH mode constants
 
  public :: printcsr   ! debugging routines
  public :: printcsrij   ! debugging routines
@@ -1375,6 +1383,7 @@ module libnegf
 
     call destroy_interactions(negf)
     call destroy_cache_space(negf)
+    call destruct_defect_ensemble(negf%defect_srh)
 
     call destroy_DM(negf)
     call destroy_contact_matrices(negf)
@@ -2361,5 +2370,107 @@ module libnegf
     mat%rowpnt(i) = rowpnt(i) + base
   enddo
 end subroutine get_CSR_matrix
+
+  !-----------------------------------------------------------------------
+  !> Configure SRH defect ensemble using the MPR (multi-phonon recombination)
+  !! scattering kernel.  Call this before the SCBA / compute_meir_wingreen loop.
+  !!
+  !! @param[inout] negf           libnegf container
+  !! @param[in]   num_defects     Number of defect centres
+  !! @param[in]   pl_indices      Principal-layer index for each defect, size nd
+  !! @param[in]   orb_start       First orbital index (1-based) per defect, size nd
+  !! @param[in]   orb_end         Last orbital index (1-based) per defect, size nd
+  !! @param[in]   eps_d           Defect energy level (eV), size nd
+  !! @param[in]   density_weight  Defect density weight per defect, size nd
+  !! @param[in]   kbt             Thermal energy k_B T (eV)
+  !! @param[in]   hbar_omega0     Phonon energy (eV)
+  !! @param[in]   s_n             Huang-Rhys factor electron
+  !! @param[in]   s_p             Huang-Rhys factor hole
+  !! @param[in]   m0_dc           Zero-phonon CB coupling (eV)
+  !! @param[in]   m0_dv           Zero-phonon VB coupling (eV)
+  !! @param[in]   n_modes         Number of vibronic modes per defect
+  !! @param[in]   ec_cut          CB cut-off energy per defect (eV), size nd
+  !! @param[in]   ev_cut          VB cut-off energy per defect (eV), size nd
+  !! @param[in]   mode            DEFECT_MODE_DELTA or DEFECT_MODE_DYSON
+  subroutine set_defect_srh_mpr(negf, num_defects, pl_indices, orb_start, &
+      & orb_end, eps_d, density_weight, kbt, hbar_omega0, s_n, s_p, &
+      & m0_dc, m0_dv, n_modes, ec_cut, ev_cut, mode)
+    type(TNegf), intent(inout) :: negf
+    integer, intent(in) :: num_defects
+    integer, intent(in) :: pl_indices(:)
+    integer, intent(in) :: orb_start(:)
+    integer, intent(in) :: orb_end(:)
+    real(dp), intent(in) :: eps_d(:)
+    real(dp), intent(in) :: density_weight(:)
+    real(dp), intent(in) :: kbt
+    real(dp), intent(in) :: hbar_omega0
+    real(dp), intent(in) :: s_n
+    real(dp), intent(in) :: s_p
+    real(dp), intent(in) :: m0_dc
+    real(dp), intent(in) :: m0_dv
+    integer, intent(in) :: n_modes
+    real(dp), intent(in) :: ec_cut(:)
+    real(dp), intent(in) :: ev_cut(:)
+    integer, intent(in) :: mode
+
+    integer :: nu, n_orb_nu, i
+
+    call init_defect_ensemble(negf%defect_srh, num_defects, negf%str%num_PLs)
+
+    do nu = 1, num_defects
+      n_orb_nu = orb_end(nu) - orb_start(nu) + 1
+      call init_defect_spec( &
+          & negf%defect_srh%defects(nu), &
+          & n_orb_nu, &
+          & [(i, i = orb_start(nu), orb_end(nu))], &
+          & [(1.0_dp / real(n_orb_nu, dp), i = 1, n_orb_nu)], &
+          & n_modes)
+      negf%defect_srh%defects(nu)%eps_d = eps_d(nu)
+      negf%defect_srh%defects(nu)%density_weight = density_weight(nu)
+      negf%defect_srh%defects(nu)%kbt = kbt
+      negf%defect_srh%defects(nu)%hbar_omega0 = hbar_omega0
+      negf%defect_srh%defects(nu)%huang_rhys_n = s_n
+      negf%defect_srh%defects(nu)%huang_rhys_p = s_p
+      negf%defect_srh%defects(nu)%m0_dc = m0_dc
+      negf%defect_srh%defects(nu)%m0_dv = m0_dv
+      negf%defect_srh%defects(nu)%ec_cut = ec_cut(nu)
+      negf%defect_srh%defects(nu)%ev_cut = ev_cut(nu)
+      negf%defect_srh%defects(nu)%mode = mode
+      negf%defect_srh%defects(nu)%pl_index = pl_indices(nu)
+      call build_mpr_kernel(negf%defect_srh%defects(nu))
+    end do
+
+  end subroutine set_defect_srh_mpr
+
+  !-----------------------------------------------------------------------
+  !> Read out computed SRH recombination rates after the SCBA loop.
+  !!
+  !! @param[in]  negf                  libnegf container
+  !! @param[out] f_occ_out             Defect occupancy per defect, size nd
+  !! @param[out] rate_net_el_out       Net electron rate per defect, size nd
+  !! @param[out] rate_net_hl_out       Net hole rate per defect, size nd
+  !! @param[out] pl_recomb_rate_out    Per-PL recombination rate, size num_pls
+  !! @param[out] total_recomb_rate_out Total recombination rate
+  subroutine get_defect_srh_rates(negf, f_occ_out, rate_net_el_out, &
+      & rate_net_hl_out, pl_recomb_rate_out, total_recomb_rate_out)
+    type(TNegf), intent(in) :: negf
+    real(dp), intent(out) :: f_occ_out(:)
+    real(dp), intent(out) :: rate_net_el_out(:)
+    real(dp), intent(out) :: rate_net_hl_out(:)
+    real(dp), intent(out) :: pl_recomb_rate_out(:)
+    real(dp), intent(out) :: total_recomb_rate_out
+
+    integer :: nu
+
+    do nu = 1, negf%defect_srh%num_defects
+      f_occ_out(nu)       = negf%defect_srh%defects(nu)%f_occ
+      rate_net_el_out(nu) = negf%defect_srh%defects(nu)%rate_net_el
+      rate_net_hl_out(nu) = negf%defect_srh%defects(nu)%rate_net_hl
+    end do
+
+    pl_recomb_rate_out(:)  = negf%defect_srh%pl_recomb_rate(:)
+    total_recomb_rate_out  = negf%defect_srh%total_recomb_rate
+
+  end subroutine get_defect_srh_rates
 
 end module libnegf

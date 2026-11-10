@@ -29,6 +29,7 @@ module iterative_cpu
   use ln_structure, only : TStruct_Info
   use lib_param, only : MAXNCONT, Tnegf, intarray
   use interactions, only : TInteraction, TInteractionList, TInteractionNode
+  use ln_defect_types, only : TDefectEnsemble
   use ln_messages
 
   implicit none
@@ -378,12 +379,31 @@ contains
     type(z_DNS) :: sigma_n(:,:)
 
     type(TInteractionNode), pointer :: it
+    integer :: pl, m_orb, pl_start, pl_end, nbl, orb_global
+
     it => negf%interactList%first
 
     do while (associated(it))
       call it%inter%add_sigma_n(sigma_n, negf%iEloc, negf%iKloc, negf%spin)
       it => it%next
     end do
+
+    ! SRH defect self-energy injection (Task 5)
+    if (negf%defect_srh%is_active .and. &
+        & allocated(negf%defect_srh%sigma_less)) then
+      nbl = negf%str%num_PLs
+      do pl = 1, nbl
+        pl_start = negf%str%mat_PL_start(pl)
+        pl_end   = negf%str%mat_PL_end(pl)
+        do m_orb = 1, pl_end - pl_start + 1
+          orb_global = pl_start + m_orb - 1
+          sigma_n(pl, pl)%val(m_orb, m_orb) = &
+              & sigma_n(pl, pl)%val(m_orb, m_orb) &
+              & + negf%defect_srh%sigma_less(orb_global, negf%iE)
+        end do
+      end do
+    end if
+
   end subroutine add_sigma_n
   !************************************************************************
   !

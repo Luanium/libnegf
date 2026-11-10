@@ -43,6 +43,11 @@ module integrations
  use ln_inelastic
  use elphinel
  use ln_enums, only : integration_type
+ use ln_defect_types, only : TDefectEnsemble, alloc_ensemble_sigma, &
+     & DEFECT_MODE_DYSON
+ use ln_defect_srh, only : solve_defect_occupation, solve_defect_dyson_keldysh, &
+     & compute_extended_defect_selfenergy
+ use ln_cache, only : TMatLabel
 #:if defined("MPI")
   use libmpifx_module
 #:endif
@@ -81,6 +86,8 @@ module integrations
  public :: integrate_el       ! integration of tunneling (el)
  public :: integrate_el_meir_wingreen
  public :: integrate_ph       ! integration of tunneling (ph)
+
+ public :: update_defect_srh_selfenergy ! SRH defect SCBA update
 
 
  ! ////////////////////////////////////////////////////////////
@@ -1211,6 +1218,8 @@ contains
 
     real(dp), DIMENSION(:), allocatable :: curr_mat, frm_f
     real(dp) :: Er, scba_elastic_error, scba_inelastic_error
+    real(dp) :: prev_recomb_rate
+    logical :: defect_scba_converged
     complex(dp) :: zt, Ec
 
     ncont = negf%str%num_conts
@@ -1248,12 +1257,17 @@ contains
     call interaction_prepare(negf)
     call negf%scbaDriverInelastic%init(negf%scba_inelastic_tol, dowrite=.false.)
     scba_niter_inela = get_max_niter_inelastic(negf%interactList)
+    if (negf%defect_srh%is_active) then
+      scba_niter_inela = max(scba_niter_inela, negf%defect_srh%scba_niter)
+    end if
     scba_niter_ela = get_max_niter_elastic(negf%interactList)
     if (negf%cartComm%rank == 0) then
       call write_info(negf%verbose, 30, 'NUMBER OF SCBA INELASTIC ITERATIONS', scba_niter_inela)
       call write_info(negf%verbose, 30, 'NUMBER OF SCBA ELASTIC ITERATIONS', scba_niter_ela)
     end if
     scba_iter = 0
+    prev_recomb_rate  = 0.0_dp
+    defect_scba_converged = .false.
 
     scba: do while (.not.negf%scbaDriverInelastic%is_converged() .and. scba_iter <= scba_niter_inela)
 
@@ -1299,6 +1313,8 @@ contains
 
           ! Avoids cleanup of block-dense Gn for layer currents
           negf%tDestroyGn = .false.
+          ! Preserve Gr for SRH defect SCBA update
+          if (negf%defect_srh%is_active) negf%tDestroyGr = .false.
           if (particle == 1) then
             call compute_Gn(negf, outer, ncont, Ec, frm_f, G, scba_elastic_error)
           else
@@ -1345,6 +1361,8 @@ contains
       if (id0.and.negf%verbose.gt.VBT) call message_clock('Compute self-energies ')
       call compute_Sigmas_inelastic(negf)
       if (id0.and.negf%verbose.gt.VBT) call write_clock
+      ! Clear G_r cache after SRH update (preserved only for the update step)
+      if (negf%defect_srh%is_active) call negf%G_r%destroy()
 
       ! Integrate energy-resolved currents 
       call electron_current_meir_wingreen(negf)
@@ -1355,6 +1373,17 @@ contains
 
       !Check SCBA convergence on layer currents.
       call negf%scbaDriverInelastic%check_J_convergence(negf%currents)
+
+      ! When only defect SRH is active, also require defect rates to converge
+      if (negf%defect_srh%is_active) then
+        defect_scba_converged = &
+            & abs(negf%defect_srh%total_recomb_rate - prev_recomb_rate) &
+            & <= negf%scba_inelastic_tol * (abs(prev_recomb_rate) + 1.0e-30_dp)
+        prev_recomb_rate = negf%defect_srh%total_recomb_rate
+        if (.not. defect_scba_converged) then
+          negf%scbaDriverInelastic%converged = .false.
+        end if
+      end if
 
       if (negf%cartComm%rank == 0) then
         scba_inelastic_error = negf%scbaDriverInelastic%scba_error()
@@ -1862,6 +1891,8 @@ contains
     integer :: scba_iter, scba_niter_inela, scba_niter_ela, size_ni, ref_bk
     integer :: iE, iK, j1, Npoints, outer, ncont, icont, scba_elastic_iter
     real(dp) :: ncyc, scba_elastic_tol, scba_elastic_error, scba_inelastic_error
+    real(dp) :: prev_recomb_rate
+    logical :: defect_scba_converged
     Type(z_DNS), dimension(MAXNCONT) :: SelfEneR, Tlc, Tcl, GS
     real(dp), dimension(:), allocatable :: curr_mat, frm
     complex(dp) :: Ec
@@ -1898,11 +1929,17 @@ contains
     call interaction_prepare(negf)
     call negf%scbaDriverInelastic%init(tol = negf%scba_inelastic_tol, dowrite = .true.)
     scba_niter_inela = get_max_niter_inelastic(negf%interactList)
+    ! SRH defect may require SCBA even without other inelastic interactions
+    if (negf%defect_srh%is_active) then
+      scba_niter_inela = max(scba_niter_inela, negf%defect_srh%scba_niter)
+    end if
     scba_niter_ela = get_max_niter_elastic(negf%interactList)
     scba_elastic_tol = negf%scba_elastic_tol
     call write_info(negf%verbose, 30, 'NUMBER OF SCBA INELASTIC ITERATIONS', scba_niter_inela)
     call write_info(negf%verbose, 30, 'NUMBER OF SCBA ELASTIC ITERATIONS', scba_niter_ela)
     scba_iter = 0
+    prev_recomb_rate  = 0.0_dp
+    defect_scba_converged = .false.
 
     scba: do while (.not.negf%scbaDriverInelastic%is_converged() .and. scba_iter <= scba_niter_inela)
 
@@ -1961,7 +1998,18 @@ contains
 
           !call write_real_info(negf%verbose, VBT, 'scba elastic error',scba_elastic_error)
 
-          negf%tDestroyGr = .true.; negf%tDestroyGn = .true.
+          ! Preserve Gr when SRH defect is active (needed for G> computation)
+          if (negf%defect_srh%is_active) then
+            negf%tDestroyGr = .false.
+          else
+            negf%tDestroyGr = .true.
+          end if
+          ! Preserve Gn when SRH defect is active (needed for G< extraction)
+          if (.not. negf%defect_srh%is_active) then
+            negf%tDestroyGn = .true.
+          else
+            negf%tDestroyGn = .false.
+          end if
           if (id0.and.negf%verbose.gt.VBT) call message_clock('Compute Meir-Wingreen ')
           call iterative_meir_wingreen(negf,real(Ec),SelfEneR,frm,curr_mat)
           if (id0.and.negf%verbose.gt.VBT) call write_clock
@@ -1985,6 +2033,8 @@ contains
       if (id0.and.negf%verbose.gt.VBT) call message_clock('Compute self-energies ')
       call compute_Sigmas_inelastic(negf)
       if (id0.and.negf%verbose.gt.VBT) call write_clock
+      ! Clear G_r cache after SRH update (preserved only for the update step)
+      if (negf%defect_srh%is_active) call negf%G_r%destroy()
 
       call electron_current_meir_wingreen(negf)
 
@@ -1995,6 +2045,16 @@ contains
       !Check SCBA convergence on layer currents.
       !In MPI runs only root has a meaningful result => Bcast the result
       call negf%scbaDriverInelastic%check_J_convergence(negf%currents)
+      ! When only defect SRH is active, also require defect rates to converge
+      if (negf%defect_srh%is_active) then
+        defect_scba_converged = &
+            & abs(negf%defect_srh%total_recomb_rate - prev_recomb_rate) &
+            & <= negf%scba_inelastic_tol * (abs(prev_recomb_rate) + 1.0e-30_dp)
+        prev_recomb_rate = negf%defect_srh%total_recomb_rate
+        if (.not. defect_scba_converged) then
+          negf%scbaDriverInelastic%converged = .false.
+        end if
+      end if
       if (negf%cartComm%rank == 0) then
         scba_inelastic_error = negf%scbaDriverInelastic%scba_error()
         call write_real_info(negf%verbose, VBT, 'scba inelastic error',scba_inelastic_error)
@@ -2036,6 +2096,8 @@ contains
     integer :: scba_niter_inela
     real(dp) :: Er, scba_elastic_tol, scba_elastic_error
     real(dp) :: scba_inelastic_error
+    real(dp) :: prev_recomb_rate
+    logical :: defect_scba_converged
     real(dp), dimension(:), allocatable :: curr_mat, ldos_mat, frm
     complex(dp) :: Ec
     type(z_CSR) :: G
@@ -2086,6 +2148,9 @@ contains
     call interaction_prepare(negf)
     call negf%scbaDriverInelastic%init(negf%scba_inelastic_tol, dowrite=.false.)
     scba_niter_inela = get_max_niter_inelastic(negf%interactList)
+    if (negf%defect_srh%is_active) then
+      scba_niter_inela = max(scba_niter_inela, negf%defect_srh%scba_niter)
+    end if
     scba_niter_ela = get_max_niter_elastic(negf%interactList)
     scba_elastic_tol = negf%scba_elastic_tol
     if (negf%cartComm%rank == 0) then
@@ -2093,6 +2158,8 @@ contains
       call write_info(negf%verbose, 30, 'NUMBER OF SCBA ELASTIC ITERATIONS', scba_niter_ela)
     end if
     scba_iter = 0
+    prev_recomb_rate  = 0.0_dp
+    defect_scba_converged = .false.
 
     scba: do while (.not.negf%scbaDriverInelastic%is_converged() .and. scba_iter <= scba_niter_inela)
 
@@ -2134,6 +2201,8 @@ contains
 
           ! Avoids cleanup of block-dense Gn for layer currents (ESH is recomputed)
           negf%tDestroyGn = .false.
+          ! Preserve Gr for SRH defect SCBA update
+          if (negf%defect_srh%is_active) negf%tDestroyGr = .false.
 
           call compute_Gn(negf, outer, ncont, Ec, frm, G, scba_elastic_error)
 
@@ -2162,6 +2231,8 @@ contains
       if (id0.and.negf%verbose.gt.VBT) call message_clock('Compute self-energies ')
       call compute_Sigmas_inelastic(negf)
       if (id0.and.negf%verbose.gt.VBT) call write_clock
+      ! Clear G_r cache after SRH update (preserved only for the update step)
+      if (negf%defect_srh%is_active) call negf%G_r%destroy()
 
       call electron_current_meir_wingreen(negf)
 
@@ -2171,6 +2242,17 @@ contains
 
       !Check SCBA convergence on layer currents.
       call negf%scbaDriverInelastic%check_J_convergence(negf%currents)
+
+      ! When only defect SRH is active, also require defect rates to converge
+      if (negf%defect_srh%is_active) then
+        defect_scba_converged = &
+            & abs(negf%defect_srh%total_recomb_rate - prev_recomb_rate) &
+            & <= negf%scba_inelastic_tol * (abs(prev_recomb_rate) + 1.0e-30_dp)
+        prev_recomb_rate = negf%defect_srh%total_recomb_rate
+        if (.not. defect_scba_converged) then
+          negf%scbaDriverInelastic%converged = .false.
+        end if
+      end if
 
       if (negf%cartComm%rank == 0) then
         scba_inelastic_error = negf%scbaDriverInelastic%scba_error()
@@ -2276,6 +2358,12 @@ contains
       end select
       it => it%next
     end do
+
+    ! SRH defect self-energy update (Task 5)
+    if (negf%defect_srh%is_active) then
+      call update_defect_srh_selfenergy(negf)
+    end if
+
   end subroutine compute_sigmas_inelastic
 
   !---------------------------------------------------------------------------
@@ -3310,6 +3398,176 @@ contains
     deallocate(temp)
 
   end subroutine quasiEq_int_p
+
+  !-----------------------------------------------------------------------
+  !> Update the SRH defect self-energy after each SCBA energy loop.
+  !!
+  !! Workflow:
+  !!   1) Extract diagonal G< from negf%G_n cache for all local E points.
+  !!   2) Compute G> = G< + (Gr - Gr†) diagonal from negf%G_r cache.
+  !!   3) [MPI] Allreduce g_less_diag and g_great_diag over en_comm.
+  !!   4) Reset pl_recomb_rate and total_recomb_rate.
+  !!   5) For each defect: solve occupation or Dyson-Keldysh, accumulate rates.
+  !!   6) Call compute_extended_defect_selfenergy to fill sigma arrays.
+  !!   7) Store results in negf%defect_srh%sigma_less/great/ret.
+  !!
+  !! Sign conventions:
+  !!   g_less_diag: Im >= 0,  g_great_diag: Im <= 0,
+  !!   sigma_less: Im >= 0,   sigma_great: Im <= 0,
+  !!   sigma_ret: Im <= 0 (causal).
+  !!
+  !! @param[inout] negf  libnegf container
+  subroutine update_defect_srh_selfenergy(negf)
+    type(TNegf), intent(inout) :: negf
+
+    type(TMatLabel) :: label
+    type(z_DNS), pointer :: pGn => null()
+    type(z_DNS), pointer :: pGr => null()
+
+    integer :: n_en_global, n_orb_total, n_orb_pl
+    integer :: iE_global, iE_local, iE
+    integer :: pl, orb_local, m_orb, nu
+    integer :: pl_start, pl_end, nbl, nk_loc
+    integer :: iK
+    real(dp), allocatable :: e_grid(:), w_quad(:)
+    complex(dp), allocatable :: g_less_diag(:, :)
+    complex(dp), allocatable :: g_great_diag(:, :)
+    complex(dp), allocatable :: sigma_less_diag(:, :)
+    complex(dp), allocatable :: sigma_great_diag(:, :)
+    complex(dp), allocatable :: sigma_ret_diag(:, :)
+
+    if (.not. negf%defect_srh%is_active) return
+
+    n_en_global = size(negf%en_grid)
+    nbl = negf%str%num_PLs
+    n_orb_total = negf%H%nrow
+    nk_loc = size(negf%local_k_index)
+
+    ! Allocate full-grid diagonal G arrays
+    allocate(e_grid(n_en_global))
+    allocate(w_quad(n_en_global))
+    allocate(g_less_diag(n_orb_total, n_en_global))
+    allocate(g_great_diag(n_orb_total, n_en_global))
+    g_less_diag(:, :)  = (0.0_dp, 0.0_dp)
+    g_great_diag(:, :) = (0.0_dp, 0.0_dp)
+
+    ! Build the global energy grid and quadrature weights
+    do iE = 1, n_en_global
+      e_grid(iE)  = real(negf%en_grid(iE)%Ec)
+      w_quad(iE)  = real(negf%en_grid(iE)%wght)
+    end do
+
+    ! --- Extract diagonal G< and G> from the cache (local energy points) ---
+    ! Loop over local k-points and accumulate with k-weights
+    label%spin = negf%spin
+    do iK = 1, nk_loc
+      label%kpoint = iK
+      do iE = 1, n_en_global
+        if (negf%en_grid(iE)%cpu /= id) cycle
+        iE_local = negf%en_grid(iE)%pt_cpu
+        iE_global = negf%en_grid(iE)%pt
+        label%energy_point = iE_local
+
+        do pl = 1, nbl
+          pl_start = negf%str%mat_PL_start(pl)
+          pl_end   = negf%str%mat_PL_end(pl)
+          n_orb_pl = pl_end - pl_start + 1
+
+          label%row_block = pl
+          label%col_block = pl
+
+          ! Retrieve G< block pointer
+          if (.not. negf%G_n%is_cached(label)) cycle
+          call negf%G_n%retrieve_pointer(pGn, label)
+
+          ! Retrieve G_r block pointer (may be null if not cached)
+          pGr => null()
+          if (associated(negf%G_r)) then
+            call negf%G_r%retrieve_pointer(pGr, label)
+          end if
+
+          ! Extract diagonal entries, weighted by k-point weight
+          do m_orb = 1, n_orb_pl
+            orb_local = pl_start + m_orb - 1
+            g_less_diag(orb_local, iE_global) = &
+                & g_less_diag(orb_local, iE_global) &
+                & + negf%kweights(negf%local_k_index(iK)) * pGn%val(m_orb, m_orb)
+            ! G> = G< + (Gr - Gr†) => Im(G>) = Im(G<) + 2*Im(Gr)
+            if (associated(pGr)) then
+              g_great_diag(orb_local, iE_global) = &
+                  & g_great_diag(orb_local, iE_global) &
+                  & + negf%kweights(negf%local_k_index(iK)) * ( &
+                  & pGn%val(m_orb, m_orb) &
+                  & + 2.0_dp * cmplx(0.0_dp, aimag(pGr%val(m_orb, m_orb)), dp))
+            else
+              g_great_diag(orb_local, iE_global) = &
+                  & g_great_diag(orb_local, iE_global) &
+                  & + negf%kweights(negf%local_k_index(iK)) * pGn%val(m_orb, m_orb)
+            end if
+          end do
+
+        end do ! pl
+      end do ! iE
+    end do ! iK
+
+#:if defined("MPI")
+    ! Gather full energy grid across en_comm (allreduce sum since local arrays
+    ! are zero for non-local energy points)
+    call mpifx_allreduceip(negf%energyComm, g_less_diag, MPI_SUM)
+    call mpifx_allreduceip(negf%energyComm, g_great_diag, MPI_SUM)
+    if (negf%kComm%size > 1) then
+      call mpifx_allreduceip(negf%kComm, g_less_diag, MPI_SUM)
+      call mpifx_allreduceip(negf%kComm, g_great_diag, MPI_SUM)
+    end if
+#:endif
+
+    ! --- Reset ensemble accumulators ---
+    negf%defect_srh%pl_recomb_rate(:) = 0.0_dp
+    negf%defect_srh%total_recomb_rate = 0.0_dp
+
+    ! --- Allocate sigma diagonal arrays for this call ---
+    allocate(sigma_less_diag(n_orb_total, n_en_global))
+    allocate(sigma_great_diag(n_orb_total, n_en_global))
+    allocate(sigma_ret_diag(n_orb_total, n_en_global))
+    sigma_less_diag(:, :)  = (0.0_dp, 0.0_dp)
+    sigma_great_diag(:, :) = (0.0_dp, 0.0_dp)
+    sigma_ret_diag(:, :)   = (0.0_dp, 0.0_dp)
+
+    ! --- Solve defect occupation and accumulate rates ---
+    do nu = 1, negf%defect_srh%num_defects
+      associate(spec => negf%defect_srh%defects(nu))
+        if (spec%mode == DEFECT_MODE_DYSON) then
+          call solve_defect_dyson_keldysh(spec, e_grid, w_quad, &
+              & g_less_diag, g_great_diag)
+        else
+          call solve_defect_occupation(spec, e_grid, w_quad, &
+              & g_less_diag, g_great_diag)
+        end if
+
+        ! Accumulate per-PL and total recombination rates
+        negf%defect_srh%pl_recomb_rate(spec%pl_index) = &
+            & negf%defect_srh%pl_recomb_rate(spec%pl_index) &
+            & + spec%density_weight * spec%rate_net_el
+      end associate
+    end do
+    negf%defect_srh%total_recomb_rate = &
+        & sum(negf%defect_srh%pl_recomb_rate(:))
+
+    ! --- Compute extended self-energy on the full energy grid ---
+    call compute_extended_defect_selfenergy(negf%defect_srh, e_grid, w_quad, &
+        & sigma_less_diag, sigma_great_diag, sigma_ret_diag)
+
+    ! --- Store into ensemble for injection during the next energy loop ---
+    call alloc_ensemble_sigma(negf%defect_srh, n_orb_total, n_en_global)
+    negf%defect_srh%sigma_less(:, :)  = sigma_less_diag(:, :)
+    negf%defect_srh%sigma_great(:, :) = sigma_great_diag(:, :)
+    negf%defect_srh%sigma_ret(:, :)   = sigma_ret_diag(:, :)
+
+    deallocate(e_grid, w_quad)
+    deallocate(g_less_diag, g_great_diag)
+    deallocate(sigma_less_diag, sigma_great_diag, sigma_ret_diag)
+
+  end subroutine update_defect_srh_selfenergy
 
 end module integrations
 

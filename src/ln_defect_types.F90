@@ -36,6 +36,7 @@ module ln_defect_types
   public :: TDefectSpec, TDefectEnsemble
   public :: init_defect_ensemble, init_defect_spec, init_defect_spec_dyson
   public :: destruct_defect_spec, destruct_defect_ensemble
+  public :: alloc_ensemble_sigma, dealloc_ensemble_sigma
 
   !> Defect mode: delta approximation (no spatial extent)
   integer, parameter :: DEFECT_MODE_DELTA = 0
@@ -139,12 +140,27 @@ module ln_defect_types
     logical :: is_active = .false.
     !> Number of defect centres in the ensemble
     integer :: num_defects = 0
+    !> Maximum SCBA iterations for the defect loop (default 50)
+    integer :: scba_niter = 50
     !> Per-defect specifications, size num_defects
     type(TDefectSpec), allocatable :: defects(:)
     !> Radiative recombination rate per principal layer (1/s), size num_pls
     real(dp), allocatable :: pl_recomb_rate(:)
     !> Sum of pl_recomb_rate over all layers
     real(dp) :: total_recomb_rate = 0.0_dp
+    !> Precomputed lesser SRH self-energy on global energy grid (n_orb x n_en_global).
+    !! Im >= 0 convention. Zeroed before each SCBA iteration.
+    complex(dp), allocatable :: sigma_less(:, :)
+    !> Precomputed greater SRH self-energy on global energy grid (n_orb x n_en_global).
+    !! Im <= 0 convention.
+    complex(dp), allocatable :: sigma_great(:, :)
+    !> Precomputed retarded SRH self-energy on global energy grid (n_orb x n_en_global).
+    !! Im <= 0 (causal).
+    complex(dp), allocatable :: sigma_ret(:, :)
+    !> Number of orbitals (rows of sigma arrays)
+    integer :: n_orb_sigma = 0
+    !> Number of global energy points (cols of sigma arrays)
+    integer :: n_en_sigma = 0
   end type TDefectEnsemble
 
 contains
@@ -263,10 +279,54 @@ contains
     end if
 
     if (allocated(ensemble%pl_recomb_rate)) deallocate(ensemble%pl_recomb_rate)
+    if (allocated(ensemble%sigma_less))    deallocate(ensemble%sigma_less)
+    if (allocated(ensemble%sigma_great))   deallocate(ensemble%sigma_great)
+    if (allocated(ensemble%sigma_ret))     deallocate(ensemble%sigma_ret)
 
     ensemble%is_active = .false.
     ensemble%num_defects = 0
+    ensemble%n_orb_sigma = 0
+    ensemble%n_en_sigma = 0
 
   end subroutine destruct_defect_ensemble
+
+  !> Allocate (or re-allocate) the sigma arrays of an ensemble.
+  !!
+  !! @param[inout] ensemble   Target ensemble
+  !! @param[in]   n_orb       Number of orbitals (rows)
+  !! @param[in]   n_en        Number of global energy points (cols)
+  subroutine alloc_ensemble_sigma(ensemble, n_orb, n_en)
+    type(TDefectEnsemble), intent(inout) :: ensemble
+    integer, intent(in) :: n_orb
+    integer, intent(in) :: n_en
+
+    if (allocated(ensemble%sigma_less))  deallocate(ensemble%sigma_less)
+    if (allocated(ensemble%sigma_great)) deallocate(ensemble%sigma_great)
+    if (allocated(ensemble%sigma_ret))   deallocate(ensemble%sigma_ret)
+
+    allocate(ensemble%sigma_less(n_orb, n_en))
+    allocate(ensemble%sigma_great(n_orb, n_en))
+    allocate(ensemble%sigma_ret(n_orb, n_en))
+    ensemble%sigma_less(:, :)  = (0.0_dp, 0.0_dp)
+    ensemble%sigma_great(:, :) = (0.0_dp, 0.0_dp)
+    ensemble%sigma_ret(:, :)   = (0.0_dp, 0.0_dp)
+    ensemble%n_orb_sigma = n_orb
+    ensemble%n_en_sigma  = n_en
+
+  end subroutine alloc_ensemble_sigma
+
+  !> Deallocate the sigma arrays of an ensemble (call after SCBA loop).
+  !!
+  !! @param[inout] ensemble  Target ensemble
+  subroutine dealloc_ensemble_sigma(ensemble)
+    type(TDefectEnsemble), intent(inout) :: ensemble
+
+    if (allocated(ensemble%sigma_less))  deallocate(ensemble%sigma_less)
+    if (allocated(ensemble%sigma_great)) deallocate(ensemble%sigma_great)
+    if (allocated(ensemble%sigma_ret))   deallocate(ensemble%sigma_ret)
+    ensemble%n_orb_sigma = 0
+    ensemble%n_en_sigma  = 0
+
+  end subroutine dealloc_ensemble_sigma
 
 end module ln_defect_types

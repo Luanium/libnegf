@@ -39,6 +39,7 @@ module lib_param
   use scba
   use ln_cache
   use ln_enums, only : integration_type
+  use ln_defect_types, only : TDefectEnsemble, destruct_defect_ensemble
 #:if defined("MPI")
   use libmpifx_module, only : mpifx_comm
 #:endif
@@ -298,6 +299,9 @@ module lib_param
 
     ! Integration type for layercurrents or meirwingreen
     integer :: integration = integration_type%trapezoidal
+
+    !> SRH defect ensemble for NEGF-based recombination (Task 5)
+    type(TDefectEnsemble) :: defect_srh
 
     ! These variables need to be done to clean up
     logical :: tOrthonormal = .false.
