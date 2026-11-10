@@ -45,6 +45,7 @@ module libnegf
      & DEFECT_MODE_DELTA, DEFECT_MODE_DYSON, &
      & init_defect_ensemble, init_defect_spec
  use ln_defect_kernel, only : build_mpr_kernel
+ use ln_defect_srh, only : srh_get_band_resolved_pl_currents => get_band_resolved_pl_currents
 #:if defined("MPI")
  use libmpifx_module
 #:endif
@@ -131,6 +132,7 @@ module libnegf
 
  public :: set_defect_srh_mpr   ! Configure SRH defect ensemble (MPR kernel)
  public :: get_defect_srh_rates ! Read out SRH recombination rates
+ public :: get_band_resolved_pl_currents ! Band-resolved inter-PL currents
  public :: DEFECT_MODE_DELTA, DEFECT_MODE_DYSON ! SRH mode constants
 
  public :: printcsr   ! debugging routines
@@ -2472,5 +2474,60 @@ end subroutine get_CSR_matrix
     total_recomb_rate_out  = negf%defect_srh%total_recomb_rate
 
   end subroutine get_defect_srh_rates
+
+  !-----------------------------------------------------------------------
+  !> Band-resolved inter-PL current profile from converged SRH rates.
+  !!
+  !! Thin wrapper that forwards to ln_defect_srh::get_band_resolved_pl_currents
+  !! using negf%defect_srh. Supports the optional j_spec_pl spectral current
+  !! argument for spectral-integration mode.
+  !!
+  !! @param[in]  negf       libnegf container
+  !! @param[in]  e_split    CB/VB split energy per inter-PL boundary, size n_bnd
+  !! @param[out] j_el_pl    Electron current per boundary, size n_bnd
+  !! @param[out] j_hl_pl    Hole current per boundary, size n_bnd
+  !! @param[out] j_tot_pl   Total current per boundary, size n_bnd
+  !! @param[in]  e_grid     Optional energy grid for spectral mode, size n_en
+  !! @param[in]  w_quad     Optional quadrature weights for spectral mode, size n_en
+  !! @param[in]  j_spec_pl  Optional spectral current (n_bnd, n_en)
+  subroutine get_band_resolved_pl_currents(negf, e_split, j_el_pl, j_hl_pl, &
+      & j_tot_pl, e_grid, w_quad, j_spec_pl)
+    type(TNegf), intent(in) :: negf
+    real(dp), intent(in) :: e_split(:)
+    real(dp), intent(out) :: j_el_pl(:)
+    real(dp), intent(out) :: j_hl_pl(:)
+    real(dp), intent(out) :: j_tot_pl(:)
+    real(dp), intent(in), optional :: e_grid(:)
+    real(dp), intent(in), optional :: w_quad(:)
+    real(dp), intent(in), optional :: j_spec_pl(:, :)
+
+    integer :: n_en_use
+    real(dp), allocatable :: e_use(:), w_use(:)
+
+    if (present(e_grid) .and. present(w_quad)) then
+      n_en_use = size(e_grid)
+      allocate(e_use(n_en_use))
+      allocate(w_use(n_en_use))
+      e_use(:) = e_grid(:)
+      w_use(:) = w_quad(:)
+    else
+      allocate(e_use(1))
+      allocate(w_use(1))
+      e_use(1) = 0.0_dp
+      w_use(1) = 1.0_dp
+    end if
+
+    if (present(j_spec_pl)) then
+      call srh_get_band_resolved_pl_currents(negf%defect_srh, e_use, w_use, &
+          & e_split, j_el_pl, j_hl_pl, j_tot_pl, j_spec_pl)
+    else
+      call srh_get_band_resolved_pl_currents(negf%defect_srh, e_use, w_use, &
+          & e_split, j_el_pl, j_hl_pl, j_tot_pl)
+    end if
+
+    deallocate(e_use)
+    deallocate(w_use)
+
+  end subroutine get_band_resolved_pl_currents
 
 end module libnegf

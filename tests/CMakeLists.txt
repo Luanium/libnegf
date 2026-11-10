@@ -34,6 +34,7 @@ set(test-directories
     f90defect_srh_unit
     f90defect_dyson
     f90defect_scba
+    f90defect_hetero
 )
 
 if(WITH_TRANSPORT_GPU)

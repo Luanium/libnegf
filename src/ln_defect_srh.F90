@@ -45,6 +45,7 @@ module ln_defect_srh
   public :: solve_defect_occupation
   public :: compute_extended_defect_selfenergy
   public :: solve_defect_dyson_keldysh
+  public :: get_band_resolved_pl_currents
 
 contains
 
@@ -544,5 +545,85 @@ contains
     deallocate(tilde_dv_great)
 
   end subroutine solve_defect_dyson_keldysh
+
+  !> Compute band-resolved inter-PL currents from converged SRH defect rates.
+  !!
+  !> Compute band-resolved inter-PL currents J_el(L), J_hl(L), and J_tot(L).
+  !!
+  !! If the optional spectral inter-PL current j_spec_pl(n_bnd, n_en) is
+  !! supplied, integrates j_spec_pl over e_grid using quadrature weights w_quad,
+  !! splitting valence/hole current (E <= e_split(L)) and conduction/electron
+  !! current (E > e_split(L)).
+  !! Otherwise, derives the spatial current profile from the converged SRH
+  !! defect recombination rates via steady-state current continuity.
+  !!
+  !! @param[in]  ensemble   Converged defect ensemble
+  !! @param[in]  e_grid     Global energy grid, size n_en
+  !! @param[in]  w_quad     Quadrature weights, size n_en
+  !! @param[in]  e_split    CB/VB split energy per inter-PL boundary, size n_bnd
+  !! @param[out] j_el_pl    Electron current per boundary, size n_bnd
+  !! @param[out] j_hl_pl    Hole current per boundary, size n_bnd
+  !! @param[out] j_tot_pl   Total current per boundary, size n_bnd
+  !! @param[in]  j_spec_pl  Optional spectral current (n_bnd, n_en)
+  subroutine get_band_resolved_pl_currents(ensemble, e_grid, w_quad, e_split, &
+      & j_el_pl, j_hl_pl, j_tot_pl, j_spec_pl)
+    type(TDefectEnsemble), intent(in) :: ensemble
+    real(dp), intent(in) :: e_grid(:)
+    real(dp), intent(in) :: w_quad(:)
+    real(dp), intent(in) :: e_split(:)
+    real(dp), intent(out) :: j_el_pl(:)
+    real(dp), intent(out) :: j_hl_pl(:)
+    real(dp), intent(out) :: j_tot_pl(:)
+    real(dp), intent(in), optional :: j_spec_pl(:, :)
+
+    integer :: n_bnd, n_en, nu, l_bnd, pl, i
+    real(dp) :: r_el, r_hl
+
+    n_bnd = size(j_el_pl)
+    n_en  = size(e_grid)
+    @:ASSERT(size(w_quad) == n_en)
+    @:ASSERT(size(j_hl_pl) == n_bnd)
+    @:ASSERT(size(j_tot_pl) == n_bnd)
+    @:ASSERT(size(e_split) == n_bnd)
+
+    j_el_pl(:)  = 0.0_dp
+    j_hl_pl(:)  = 0.0_dp
+    j_tot_pl(:) = 0.0_dp
+
+    if (present(j_spec_pl)) then
+      @:ASSERT(size(j_spec_pl, 1) == n_bnd)
+      @:ASSERT(size(j_spec_pl, 2) == n_en)
+      do l_bnd = 1, n_bnd
+        do i = 1, n_en
+          if (e_grid(i) > e_split(l_bnd)) then
+            j_el_pl(l_bnd) = j_el_pl(l_bnd) + w_quad(i) * j_spec_pl(l_bnd, i)
+          else
+            j_hl_pl(l_bnd) = j_hl_pl(l_bnd) + w_quad(i) * j_spec_pl(l_bnd, i)
+          end if
+        end do
+      end do
+    else
+      do nu = 1, ensemble%num_defects
+        pl   = ensemble%defects(nu)%pl_index
+        r_el = ensemble%defects(nu)%density_weight &
+            & * ensemble%defects(nu)%rate_net_el
+        r_hl = ensemble%defects(nu)%density_weight &
+            & * ensemble%defects(nu)%rate_net_hl
+        do l_bnd = 1, n_bnd
+          if (pl > l_bnd .and. &
+              & ensemble%defects(nu)%ec_cut >= e_split(l_bnd)) then
+            j_el_pl(l_bnd) = j_el_pl(l_bnd) + r_el
+          end if
+          if (pl <= l_bnd .and. &
+              & ensemble%defects(nu)%ev_cut <= e_split(l_bnd)) then
+            j_hl_pl(l_bnd) = j_hl_pl(l_bnd) + r_hl
+          end if
+        end do
+      end do
+    end if
+
+    j_tot_pl(:) = j_el_pl(:) + j_hl_pl(:)
+
+  end subroutine get_band_resolved_pl_currents
 
 end module ln_defect_srh
