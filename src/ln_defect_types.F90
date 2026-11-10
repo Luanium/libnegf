@@ -34,7 +34,7 @@ module ln_defect_types
   public :: DEFECT_MODE_DELTA, DEFECT_MODE_DYSON
   public :: DEFECT_KERNEL_CUSTOM, DEFECT_KERNEL_MPR
   public :: TDefectSpec, TDefectEnsemble
-  public :: init_defect_ensemble, init_defect_spec
+  public :: init_defect_ensemble, init_defect_spec, init_defect_spec_dyson
   public :: destruct_defect_spec, destruct_defect_ensemble
 
   !> Defect mode: delta approximation (no spatial extent)
@@ -116,6 +116,21 @@ module ln_defect_types
     real(dp) :: rate_net_el = 0.0_dp
     !> Net hole recombination rate (1/s)
     real(dp) :: rate_net_hl = 0.0_dp
+    ! Mode B (Dyson-Keldysh) local defect mesh — allocated by init_defect_spec_dyson
+    !> Number of local omega grid points for Dyson-Keldysh integration
+    integer :: n_omega = 41
+    !> Half-width of the local omega window around eps_d (eV)
+    real(dp) :: omega_halfwidth = 0.05_dp
+    !> Local omega grid points (eV), size n_omega
+    real(dp), allocatable :: omega_grid(:)
+    !> Local omega quadrature weights (eV), size n_omega
+    real(dp), allocatable :: omega_weights(:)
+    !> Retarded defect Green's function on local grid, size n_omega
+    complex(dp), allocatable :: g_d_ret(:)
+    !> Lesser defect Green's function on local grid, size n_omega
+    complex(dp), allocatable :: g_d_less(:)
+    !> Greater defect Green's function on local grid, size n_omega
+    complex(dp), allocatable :: g_d_great(:)
   end type TDefectSpec
 
   !> Collection of defect centres together with ensemble-level accumulators.
@@ -202,8 +217,35 @@ contains
     if (allocated(spec%m_dc_em)) deallocate(spec%m_dc_em)
     if (allocated(spec%m_dv_em)) deallocate(spec%m_dv_em)
     if (allocated(spec%m_dv_capt)) deallocate(spec%m_dv_capt)
+    if (allocated(spec%omega_grid))    deallocate(spec%omega_grid)
+    if (allocated(spec%omega_weights)) deallocate(spec%omega_weights)
+    if (allocated(spec%g_d_ret))       deallocate(spec%g_d_ret)
+    if (allocated(spec%g_d_less))      deallocate(spec%g_d_less)
+    if (allocated(spec%g_d_great))     deallocate(spec%g_d_great)
 
   end subroutine destruct_defect_spec
+
+  !> Allocate the Mode B (Dyson-Keldysh) local omega grid arrays.
+  !! Safe to call multiple times; performs a re-init deallocating existing
+  !! allocations first.
+  !!
+  !! @param[inout] spec  Defect specification with n_omega and omega_halfwidth set
+  subroutine init_defect_spec_dyson(spec)
+    type(TDefectSpec), intent(inout) :: spec
+
+    if (allocated(spec%omega_grid))    deallocate(spec%omega_grid)
+    if (allocated(spec%omega_weights)) deallocate(spec%omega_weights)
+    if (allocated(spec%g_d_ret))       deallocate(spec%g_d_ret)
+    if (allocated(spec%g_d_less))      deallocate(spec%g_d_less)
+    if (allocated(spec%g_d_great))     deallocate(spec%g_d_great)
+
+    allocate(spec%omega_grid(spec%n_omega))
+    allocate(spec%omega_weights(spec%n_omega))
+    allocate(spec%g_d_ret(spec%n_omega))
+    allocate(spec%g_d_less(spec%n_omega))
+    allocate(spec%g_d_great(spec%n_omega))
+
+  end subroutine init_defect_spec_dyson
 
   !> Destroy a TDefectEnsemble: clean up each defect, then free ensemble arrays.
   !!
