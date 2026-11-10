@@ -1654,3 +1654,78 @@ subroutine negf_get_band_resolved_pl_currents(handler, n_bnd, e_split, &
   deallocate(es, jel, jhl, jtot)
 
 end subroutine negf_get_band_resolved_pl_currents
+
+!> Configure a single SRH defect with a user-supplied scattering kernel.
+!! @param[in]  handler      Handler for the libnegf instance
+!! @param[in]  i_defect     1-based defect index
+!! @param[in]  pl_index     Principal-layer index
+!! @param[in]  n_orbs       Number of coupled orbitals
+!! @param[in]  orb_indices  Orbital indices in device basis, size n_orbs
+!! @param[in]  orb_weights  Coupling weights per orbital, size n_orbs
+!! @param[in]  eps_d        Defect energy level (eV)
+!! @param[in]  density_weight  Weight factor in ensemble density
+!! @param[in]  kbt          Thermal energy k_B T (eV)
+!! @param[in]  ec_cut       CB cut-off energy (eV)
+!! @param[in]  ev_cut       VB cut-off energy (eV)
+!! @param[in]  n_modes      Number of vibronic modes
+!! @param[in]  e_shift      Energy shift per mode (eV), size n_modes
+!! @param[in]  m_dc_capt    CB capture matrix elements, size n_modes
+!! @param[in]  m_dv_em      VB emission matrix elements, size n_modes
+!! @param[in]  mode         0=DEFECT_MODE_DELTA, 1=DEFECT_MODE_DYSON
+subroutine negf_set_defect_srh_custom(handler, i_defect, pl_index, n_orbs, &
+    & orb_indices, orb_weights, eps_d, density_weight, kbt, ec_cut, ev_cut, &
+    & n_modes, e_shift, m_dc_capt, m_dv_em, mode) &
+    & bind(c, name='negf_set_defect_srh_custom')
+  use iso_c_binding, only : c_int, c_double !if:mod:use
+  use libnegfAPICommon !if:mod:use
+  use libnegf !if:mod:use
+  implicit none
+  integer(c_int), intent(in) :: handler(DAC_handlerSize) !if:var:in
+  integer(c_int), intent(in), value :: i_defect !if:var:in
+  integer(c_int), intent(in), value :: pl_index !if:var:in
+  integer(c_int), intent(in), value :: n_orbs !if:var:in
+  integer(c_int), intent(in) :: orb_indices(n_orbs) !if:var:in
+  real(c_double), intent(in) :: orb_weights(n_orbs) !if:var:in
+  real(c_double), intent(in), value :: eps_d !if:var:in
+  real(c_double), intent(in), value :: density_weight !if:var:in
+  real(c_double), intent(in), value :: kbt !if:var:in
+  real(c_double), intent(in), value :: ec_cut !if:var:in
+  real(c_double), intent(in), value :: ev_cut !if:var:in
+  integer(c_int), intent(in), value :: n_modes !if:var:in
+  real(c_double), intent(in) :: e_shift(n_modes) !if:var:in
+  real(c_double), intent(in) :: m_dc_capt(n_modes) !if:var:in
+  real(c_double), intent(in) :: m_dv_em(n_modes) !if:var:in
+  integer(c_int), intent(in), value :: mode !if:var:in
+
+  type(NEGFpointers) :: LIB
+  integer, allocatable :: orb_idx(:)
+  real(c_double), allocatable :: orb_wt(:), es(:), mdc(:), mdv(:)
+  integer :: k
+
+  LIB = transfer(handler, LIB)
+
+  allocate(orb_idx(n_orbs))
+  allocate(orb_wt(n_orbs))
+  allocate(es(n_modes))
+  allocate(mdc(n_modes))
+  allocate(mdv(n_modes))
+
+  do k = 1, n_orbs
+    orb_idx(k) = int(orb_indices(k))
+    orb_wt(k) = real(orb_weights(k), kind(orb_wt(k)))
+  end do
+  do k = 1, n_modes
+    es(k)  = real(e_shift(k), kind(es(k)))
+    mdc(k) = real(m_dc_capt(k), kind(mdc(k)))
+    mdv(k) = real(m_dv_em(k), kind(mdv(k)))
+  end do
+
+  call set_defect_srh_custom(LIB%pNEGF, int(i_defect), int(pl_index), &
+      & int(n_orbs), orb_idx, orb_wt, real(eps_d, kind(es(1))), &
+      & real(density_weight, kind(es(1))), real(kbt, kind(es(1))), &
+      & real(ec_cut, kind(es(1))), real(ev_cut, kind(es(1))), &
+      & int(n_modes), es, mdc, mdv, int(mode))
+
+  deallocate(orb_idx, orb_wt, es, mdc, mdv)
+
+end subroutine negf_set_defect_srh_custom

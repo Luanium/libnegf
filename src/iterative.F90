@@ -539,7 +539,9 @@ CONTAINS
        if (.not.p%isInitialized) then
           nbl = negf%str%num_PLs
           nKloc = size(negf%local_k_index)
-          nEloc = size(negf%en_grid)/numprocs
+          ! Ceiling division so last rank remainder still fits
+          nEloc = (size(negf%en_grid) + numprocs - 1) / numprocs
+          if (nEloc < 1) nEloc = 1
           call p%init(nEloc, nKloc, nbl, 3, 1)
        end if
     end select
@@ -602,7 +604,9 @@ CONTAINS
        if (.not.p%isInitialized) then
           nbl = negf%str%num_PLs
           nKloc = size(negf%local_k_index)
-          nEloc = size(negf%en_grid)/numprocs
+          ! Ceiling division so last rank remainder still fits
+          nEloc = (size(negf%en_grid) + numprocs - 1) / numprocs
+          if (nEloc < 1) nEloc = 1
           call p%init(nEloc, nKloc, nbl, 3, 1)
        end if
     end select
@@ -691,6 +695,12 @@ CONTAINS
       it => it%next
     end do
 
+    ! When only defect_srh is active, interactList is empty and the loop
+    ! above never caches Gr. SRH still needs G_r for spectral density.
+    if (doCacheGr .and. negf%defect_srh%is_active) then
+      call cache_Gr(negf, Gr, iE, iK, iSpin)
+    end if
+
   end subroutine set_Gr_inel
 
   ! Provides Gn to the interaction models.
@@ -741,6 +751,12 @@ CONTAINS
       end select
       it => it%next
     end do
+
+    ! When only defect_srh is active, interactList is empty and the loop
+    ! above never caches Gn. SRH still needs G_n for occupation solve.
+    if (doCacheGn .and. negf%defect_srh%is_active) then
+      call cache_Gn(negf, Gn, iE, iK, iSpin)
+    end if
   end subroutine set_Gn_inel
 
   !------------------------------------------------------------------------------!

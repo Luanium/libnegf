@@ -44,7 +44,7 @@ module libnegf
  use ln_defect_types, only : TDefectEnsemble, destruct_defect_ensemble, &
      & DEFECT_MODE_DELTA, DEFECT_MODE_DYSON, &
      & init_defect_ensemble, init_defect_spec
- use ln_defect_kernel, only : build_mpr_kernel
+ use ln_defect_kernel, only : build_mpr_kernel, set_custom_defect_kernel
  use ln_defect_srh, only : srh_get_band_resolved_pl_currents => get_band_resolved_pl_currents
 #:if defined("MPI")
  use libmpifx_module
@@ -131,6 +131,8 @@ module libnegf
  public :: thermal_conductance
 
  public :: set_defect_srh_mpr   ! Configure SRH defect ensemble (MPR kernel)
+ public :: set_defect_srh_custom ! Configure SRH defect with custom kernel
+ public :: shift_defect_levels_from_ham ! Shift eps_d/ec_cut/ev_cut by H diagonal
  public :: get_defect_srh_rates ! Read out SRH recombination rates
  public :: get_band_resolved_pl_currents ! Band-resolved inter-PL currents
  public :: DEFECT_MODE_DELTA, DEFECT_MODE_DYSON ! SRH mode constants
@@ -1953,15 +1955,29 @@ module libnegf
   subroutine compute_current(negf)
     type(Tnegf) :: negf
 
-    if ( negf%interactList%counter > 0 ) then
-       if (get_max_wq(negf%interactList) == 0.0_dp) then
+    logical :: used_meir_wingreen
+
+    used_meir_wingreen = .false.
+
+    if ( negf%interactList%counter > 0 .or. negf%defect_srh%is_active ) then
+       if (get_max_wq(negf%interactList) == 0.0_dp &
+           & .and. .not. negf%defect_srh%is_active) then
           call compute_dephasing_transmission(negf)
+       else
+          call tunneling_int_def(negf)
+          call meir_wingreen(negf)
+          used_meir_wingreen = .true.
        end if
     else
        call compute_landauer(negf);
     endif
 
-    call electron_current(negf)
+    ! electron_current integrates tunn_mat (Landauer/dephasing).
+    ! meir_wingreen already fills negf%currents via
+    ! electron_current_meir_wingreen, so skip the duplicate call.
+    if (.not. used_meir_wingreen) then
+      call electron_current(negf)
+    end if
 
     call destroy_contact_matrices(negf)
 
@@ -2529,5 +2545,108 @@ end subroutine get_CSR_matrix
     deallocate(w_use)
 
   end subroutine get_band_resolved_pl_currents
+
+  !-----------------------------------------------------------------------
+  !> Configure a single SRH defect with a user-supplied scattering kernel.
+  !!
+  !! Initialises defect i_defect within negf%defect_srh%defects(:) with
+  !! the given orbital mapping and directly supplied kernel arrays.
+  !! The ensemble must already have been allocated via init_defect_ensemble
+  !! or via a prior call to set_defect_srh_mpr.
+  !!
+  !! @param[inout] negf           libnegf container
+  !! @param[in]   i_defect        1-based index into defect_srh%defects(:)
+  !! @param[in]   pl_index        Principal-layer index hosting the defect
+  !! @param[in]   n_orbs          Number of coupled orbitals
+  !! @param[in]   orb_indices     Orbital indices in device basis, size n_orbs
+  !! @param[in]   orb_weights     Coupling weights per orbital, size n_orbs
+  !! @param[in]   eps_d           Defect energy level (eV)
+  !! @param[in]   density_weight  Weight factor in ensemble density
+  !! @param[in]   kbt             Thermal energy k_B T (eV)
+  !! @param[in]   ec_cut          Conduction-band cut-off energy (eV)
+  !! @param[in]   ev_cut          Valence-band cut-off energy (eV)
+  !! @param[in]   n_modes         Number of vibronic modes
+  !! @param[in]   e_shift         Energy shift per mode (eV), size n_modes
+  !! @param[in]   m_dc_capt       CB capture matrix elements, size n_modes
+  !! @param[in]   m_dv_em         VB emission matrix elements, size n_modes
+  !! @param[in]   mode            DEFECT_MODE_DELTA or DEFECT_MODE_DYSON
+  subroutine set_defect_srh_custom(negf, i_defect, pl_index, n_orbs, &
+      & orb_indices, orb_weights, eps_d, density_weight, kbt, ec_cut, ev_cut, &
+      & n_modes, e_shift, m_dc_capt, m_dv_em, mode)
+    type(TNegf), intent(inout) :: negf
+    integer, intent(in) :: i_defect
+    integer, intent(in) :: pl_index
+    integer, intent(in) :: n_orbs
+    integer, intent(in) :: orb_indices(:)
+    real(dp), intent(in) :: orb_weights(:)
+    real(dp), intent(in) :: eps_d
+    real(dp), intent(in) :: density_weight
+    real(dp), intent(in) :: kbt
+    real(dp), intent(in) :: ec_cut
+    real(dp), intent(in) :: ev_cut
+    integer, intent(in) :: n_modes
+    real(dp), intent(in) :: e_shift(:)
+    real(dp), intent(in) :: m_dc_capt(:)
+    real(dp), intent(in) :: m_dv_em(:)
+    integer, intent(in) :: mode
+
+    associate(spec => negf%defect_srh%defects(i_defect))
+      call init_defect_spec(spec, n_orbs, orb_indices, orb_weights, n_modes)
+      spec%pl_index       = pl_index
+      spec%eps_d          = eps_d
+      spec%density_weight = density_weight
+      spec%kbt            = kbt
+      spec%ec_cut         = ec_cut
+      spec%ev_cut         = ev_cut
+      spec%mode           = mode
+      call set_custom_defect_kernel(spec, e_shift, m_dc_capt, m_dv_em)
+    end associate
+
+  end subroutine set_defect_srh_custom
+
+  !-----------------------------------------------------------------------
+  !> Shift each defect's energy levels by the orbital-weighted diagonal
+  !! H shift relative to a reference diagonal.
+  !!
+  !! For each defect nu, computes:
+  !!   delta_U = sum_{m in orb_indices} orb_weights(m) * (Re(H_mm) - h0_mm)
+  !! and applies: eps_d += delta_U, ec_cut += delta_U, ev_cut += delta_U.
+  !!
+  !! Silently returns if negf%H is not associated.
+  !!
+  !! @param[inout] negf        libnegf container
+  !! @param[in]   h0_diag_ref  Reference diagonal H, size n_orb_total
+  subroutine shift_defect_levels_from_ham(negf, h0_diag_ref)
+    type(TNegf), intent(inout) :: negf
+    real(dp), intent(in) :: h0_diag_ref(:)
+
+    integer :: nu, m_idx, orb
+    real(dp) :: delta_u
+    complex(dp), allocatable :: h_diag(:)
+
+    if (.not. associated(negf%H)) return
+    if (.not. negf%defect_srh%is_active) return
+
+    allocate(h_diag(negf%H%nrow))
+    call getdiag(negf%H, h_diag)
+
+    do nu = 1, negf%defect_srh%num_defects
+      associate(spec => negf%defect_srh%defects(nu))
+        delta_u = 0.0_dp
+        do m_idx = 1, size(spec%orb_indices)
+          orb = spec%orb_indices(m_idx)
+          delta_u = delta_u &
+              & + spec%orb_weights(m_idx) &
+              & * (real(h_diag(orb), dp) - h0_diag_ref(orb))
+        end do
+        spec%eps_d  = spec%eps_d  + delta_u
+        spec%ec_cut = spec%ec_cut + delta_u
+        spec%ev_cut = spec%ev_cut + delta_u
+      end associate
+    end do
+
+    deallocate(h_diag)
+
+  end subroutine shift_defect_levels_from_ham
 
 end module libnegf

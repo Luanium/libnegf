@@ -530,3 +530,63 @@ class NEGF:
             j_tot_pl,
         )
         return j_el_pl, j_hl_pl, j_tot_pl
+
+    def set_defect_srh_custom(self, i_defect, pl_index, orb_indices,
+                              orb_weights, eps_d, density_weight, kbt,
+                              ec_cut, ev_cut, e_shift, m_dc_capt, m_dv_em,
+                              mode=0):
+        """Configure a single SRH defect with a user-supplied kernel.
+
+        Args:
+            i_defect (int): 1-based defect index
+            pl_index (int): principal-layer index
+            orb_indices (int array): orbital indices in device basis
+            orb_weights (float array): coupling weights per orbital
+            eps_d (float): defect energy level (eV)
+            density_weight (float): weight factor in ensemble density
+            kbt (float): thermal energy k_B T (eV)
+            ec_cut (float): CB cut-off energy (eV)
+            ev_cut (float): VB cut-off energy (eV)
+            e_shift (float array): energy shift per mode (eV)
+            m_dc_capt (float array): CB capture matrix elements per mode
+            m_dv_em (float array): VB emission matrix elements per mode
+            mode (int): 0=DEFECT_MODE_DELTA, 1=DEFECT_MODE_DYSON
+        """
+        n_orbs = len(orb_indices)
+        n_modes = len(e_shift)
+        self._lib.negf_set_defect_srh_custom.argtypes = [
+            self._href_type,
+            c_int,
+            c_int,
+            c_int,
+            ndpointer(c_int),
+            ndpointer(c_double),
+            c_double,
+            c_double,
+            c_double,
+            c_double,
+            c_double,
+            c_int,
+            ndpointer(c_double),
+            ndpointer(c_double),
+            ndpointer(c_double),
+            c_int,
+        ]
+        self._lib.negf_set_defect_srh_custom(
+            self._href,
+            c_int(i_defect),
+            c_int(pl_index),
+            c_int(n_orbs),
+            np.array(orb_indices, dtype=INTTYPE),
+            np.array(orb_weights, dtype=REALTYPE),
+            c_double(eps_d),
+            c_double(density_weight),
+            c_double(kbt),
+            c_double(ec_cut),
+            c_double(ev_cut),
+            c_int(n_modes),
+            np.array(e_shift, dtype=REALTYPE),
+            np.array(m_dc_capt, dtype=REALTYPE),
+            np.array(m_dv_em, dtype=REALTYPE),
+            c_int(mode),
+        )

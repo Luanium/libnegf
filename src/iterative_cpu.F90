@@ -388,7 +388,10 @@ contains
       it => it%next
     end do
 
-    ! SRH defect self-energy injection (Task 5)
+    ! SRH defect self-energy injection (Task 5).
+    ! libnegf sigma_n uses the tilde convention: real non-negative diagonal
+    ! tilde_Sigma< = -i * Sigma<.  defect_srh%sigma_less stores +i * tilde_Sigma<
+    ! (Keldysh), so inject aimag(sigma_less) as a real contribution.
     if (negf%defect_srh%is_active .and. &
         & allocated(negf%defect_srh%sigma_less)) then
       nbl = negf%str%num_PLs
@@ -399,7 +402,8 @@ contains
           orb_global = pl_start + m_orb - 1
           sigma_n(pl, pl)%val(m_orb, m_orb) = &
               & sigma_n(pl, pl)%val(m_orb, m_orb) &
-              & + negf%defect_srh%sigma_less(orb_global, negf%iE)
+              & + cmplx(aimag(negf%defect_srh%sigma_less(orb_global, negf%iE)), &
+              & 0.0_dp, dp)
         end do
       end do
     end if

@@ -16,6 +16,7 @@ program test_defect_scba
   use ln_precision, only : dp
   use libnegf, only : TNegf, init_negf, destroy_negf, &
       & set_defect_srh_mpr, get_defect_srh_rates
+  use libmpifx_module
 
   implicit none
 
@@ -36,6 +37,21 @@ program test_defect_scba
 
   real(dp) :: e_grid(n_en), w_quad(n_en)
   integer :: i
+
+  ! Reference results saved from Step 2 for Step 4 comparison
+  real(dp) :: ref_f_occ    = 0.0_dp
+  real(dp) :: ref_rate_el  = 0.0_dp
+  real(dp) :: ref_rate_hl  = 0.0_dp
+  real(dp) :: ref_total_rc = 0.0_dp
+
+  ! MPI communicator for Step 4
+  type(mpifx_comm) :: world_comm
+  integer :: my_rank, nprocs_mpi, mpierr
+
+  call mpifx_init(mpierr)
+  call world_comm%init()
+  my_rank   = world_comm%rank
+  nprocs_mpi = world_comm%size
 
   do i = 1, n_en
     e_grid(i) = e0 + real(i - 1, dp) * de
@@ -303,7 +319,14 @@ program test_defect_scba
       error stop 1
     end if
 
+    ! Save Step 2 reference values for Step 4 MPI scaling check
+    ref_f_occ    = ensemble%defects(1)%f_occ
+    ref_rate_el  = ensemble%defects(1)%rate_net_el
+    ref_rate_hl  = ensemble%defects(1)%rate_net_hl
+    ref_total_rc = ensemble%pl_recomb_rate(1)
+
     call destruct_defect_ensemble(ensemble)
+    write(*, '(a)') 'Step 2 (coupled SCBA): PASSED'
   end block
 
   ! =========================================================================
@@ -366,5 +389,183 @@ program test_defect_scba
   end block
 
   write(*, '(a)') 'Task 5: test_defect_scba PASSED'
+
+  ! =========================================================================
+  ! Step 4: MPI energy-grid parallel scaling check.
+  ! Partitions the energy grid across MPI ranks and verifies that the SCBA
+  ! result is identical to the full-grid reference from Step 2.
+  ! =========================================================================
+  block
+    type(TDefectEnsemble) :: ens4
+
+    complex(dp) :: g_less_full(n_orb, n_en)
+    complex(dp) :: g_great_full(n_orb, n_en)
+    complex(dp) :: g_ret_0(n_orb, n_en)
+    complex(dp) :: sigma_0_less(n_orb, n_en)
+    complex(dp) :: sigma_0_great(n_orb, n_en)
+    complex(dp) :: sigma_less4(n_orb, n_en)
+    complex(dp) :: sigma_great4(n_orb, n_en)
+    complex(dp) :: sigma_ret4(n_orb, n_en)
+    complex(dp) :: sigma_less_prev4(n_orb, n_en)
+    real(dp) :: g_less_re(n_orb, n_en), g_less_im(n_orb, n_en)
+    real(dp) :: g_great_re(n_orb, n_en), g_great_im(n_orb, n_en)
+
+    real(dp) :: f_vb, f_cb, gamma_0
+    real(dp) :: mu_v, mu_c
+    real(dp) :: f_occ4_prev, scba_err4
+    real(dp) :: abs_g_ret_sq
+    integer :: iter4, m_orb4, j4
+    logical :: conv4
+
+    gamma_0 = 0.05_dp
+    mu_v    = -0.3_dp
+    mu_c    =  0.5_dp
+
+    call init_defect_ensemble(ens4, 1, 1)
+
+    associate(spec4 => ens4%defects(1))
+      call init_defect_spec(spec4, 2, [1, 2], &
+          & [0.5_dp, 0.5_dp], n_modes)
+      spec4%eps_d          = eps_d
+      spec4%kbt            = kbt
+      spec4%density_weight = 1.0_dp
+      spec4%hbar_omega0    = hbar_omega0
+      spec4%huang_rhys_n   = s_hr
+      spec4%huang_rhys_p   = s_hr
+      spec4%m0_dc          = m0_dc
+      spec4%m0_dv          = m0_dv
+      spec4%ec_cut         = eps_d + e_shift - 0.05_dp
+      spec4%ev_cut         = eps_d - e_shift + 0.05_dp
+      spec4%mode           = DEFECT_MODE_DELTA
+      spec4%pl_index       = 1
+      call build_mpr_kernel(spec4)
+    end associate
+
+    ! Build bare (contact-only) GFs
+    do j4 = 1, n_en
+      f_vb = 1.0_dp / (1.0_dp + exp((e_grid(j4) - mu_v) / kbt))
+      f_cb = 1.0_dp / (1.0_dp + exp((e_grid(j4) - mu_c) / kbt))
+
+      g_ret_0(1, j4) = 1.0_dp / cmplx(0.0_dp, 0.5_dp * gamma_0, dp)
+      g_ret_0(2, j4) = 1.0_dp / cmplx(0.0_dp, 0.5_dp * gamma_0, dp)
+
+      sigma_0_less(1, j4)  = cmplx(0.0_dp,  gamma_0 * f_vb, dp)
+      sigma_0_great(1, j4) = cmplx(0.0_dp, -gamma_0 * (1.0_dp - f_vb), dp)
+      sigma_0_less(2, j4)  = cmplx(0.0_dp,  gamma_0 * f_cb, dp)
+      sigma_0_great(2, j4) = cmplx(0.0_dp, -gamma_0 * (1.0_dp - f_cb), dp)
+    end do
+
+    sigma_less4(:, :)  = (0.0_dp, 0.0_dp)
+    sigma_great4(:, :) = (0.0_dp, 0.0_dp)
+    sigma_ret4(:, :)   = (0.0_dp, 0.0_dp)
+
+    f_occ4_prev = 0.5_dp
+    conv4 = .false.
+    scba_err4 = 1.0_dp
+    iter4 = 0
+
+    do while (.not. conv4 .and. iter4 < max_scba)
+
+      ! Rank-partitioned dressed GF: each rank computes its local energy
+      ! points and sets the rest to zero; then Allreduce with MPI_SUM
+      g_less_re(:, :)  = 0.0_dp
+      g_less_im(:, :)  = 0.0_dp
+      g_great_re(:, :) = 0.0_dp
+      g_great_im(:, :) = 0.0_dp
+
+      do j4 = 1, n_en
+        if (mod(j4 - 1, nprocs_mpi) /= my_rank) cycle
+        do m_orb4 = 1, n_orb
+          block
+            complex(dp) :: gr4, gl4, gg4
+            gr4 = 1.0_dp / &
+                & (1.0_dp / g_ret_0(m_orb4, j4) - sigma_ret4(m_orb4, j4))
+            abs_g_ret_sq = real(gr4)**2 + aimag(gr4)**2
+            gl4 = abs_g_ret_sq * &
+                & (sigma_0_less(m_orb4, j4) + sigma_less4(m_orb4, j4))
+            gg4 = abs_g_ret_sq * &
+                & (sigma_0_great(m_orb4, j4) + sigma_great4(m_orb4, j4))
+            g_less_re(m_orb4, j4)  = real(gl4)
+            g_less_im(m_orb4, j4)  = aimag(gl4)
+            g_great_re(m_orb4, j4) = real(gg4)
+            g_great_im(m_orb4, j4) = aimag(gg4)
+          end block
+        end do
+      end do
+
+      call mpifx_allreduceip(world_comm, g_less_re, MPI_SUM)
+      call mpifx_allreduceip(world_comm, g_less_im, MPI_SUM)
+      call mpifx_allreduceip(world_comm, g_great_re, MPI_SUM)
+      call mpifx_allreduceip(world_comm, g_great_im, MPI_SUM)
+
+      do j4 = 1, n_en
+        do m_orb4 = 1, n_orb
+          g_less_full(m_orb4, j4)  = &
+              & cmplx(g_less_re(m_orb4, j4),  g_less_im(m_orb4, j4),  dp)
+          g_great_full(m_orb4, j4) = &
+              & cmplx(g_great_re(m_orb4, j4), g_great_im(m_orb4, j4), dp)
+        end do
+      end do
+
+      call solve_defect_occupation(ens4%defects(1), e_grid, w_quad, &
+          & g_less_full, g_great_full)
+
+      sigma_less_prev4(:, :) = sigma_less4(:, :)
+      sigma_less4(:, :)  = (0.0_dp, 0.0_dp)
+      sigma_great4(:, :) = (0.0_dp, 0.0_dp)
+      sigma_ret4(:, :)   = (0.0_dp, 0.0_dp)
+
+      ens4%pl_recomb_rate(1) = &
+          & ens4%defects(1)%density_weight * ens4%defects(1)%rate_net_el
+      ens4%total_recomb_rate = ens4%pl_recomb_rate(1)
+
+      call compute_extended_defect_selfenergy(ens4, e_grid, w_quad, &
+          & sigma_less4, sigma_great4, sigma_ret4)
+
+      scba_err4 = abs(ens4%defects(1)%f_occ - f_occ4_prev)
+      if (scba_err4 < scba_tol .and. &
+          & maxval(abs(aimag(sigma_less4) - aimag(sigma_less_prev4))) &
+          & < scba_tol) then
+        conv4 = .true.
+      end if
+      f_occ4_prev = ens4%defects(1)%f_occ
+
+      iter4 = iter4 + 1
+    end do
+
+    ! Verify MPI-partitioned result matches Step 2 reference
+    if (abs(ens4%defects(1)%f_occ - ref_f_occ) > 1.0e-12_dp) then
+      write(*, '(a,es14.6,a,es14.6)') &
+          & 'FAIL step4 f_occ: MPI=', ens4%defects(1)%f_occ, &
+          & ' ref=', ref_f_occ
+      error stop 1
+    end if
+    if (abs(ens4%defects(1)%rate_net_el - ref_rate_el) > 1.0e-12_dp) then
+      write(*, '(a,es14.6,a,es14.6)') &
+          & 'FAIL step4 rate_net_el: MPI=', ens4%defects(1)%rate_net_el, &
+          & ' ref=', ref_rate_el
+      error stop 1
+    end if
+    if (abs(ens4%defects(1)%rate_net_hl - ref_rate_hl) > 1.0e-12_dp) then
+      write(*, '(a,es14.6,a,es14.6)') &
+          & 'FAIL step4 rate_net_hl: MPI=', ens4%defects(1)%rate_net_hl, &
+          & ' ref=', ref_rate_hl
+      error stop 1
+    end if
+    if (abs(ens4%total_recomb_rate - ref_total_rc) > 1.0e-12_dp) then
+      write(*, '(a,es14.6,a,es14.6)') &
+          & 'FAIL step4 total_recomb_rate: MPI=', ens4%total_recomb_rate, &
+          & ' ref=', ref_total_rc
+      error stop 1
+    end if
+
+    call destruct_defect_ensemble(ens4)
+
+    if (my_rank == 0) then
+      write(*, '(a)') 'Task 8 Step 4 (MPI scaling): PASSED'
+    end if
+  end block
+
+  call mpifx_finalize(mpierr)
 
 end program test_defect_scba

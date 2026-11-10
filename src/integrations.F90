@@ -1324,7 +1324,9 @@ contains
           ! ---------------------------------------------------------------------
           ! Compute layer-to-layer currents and release memory
           ! ---------------------------------------------------------------------
-          negf%tDestroyGn = .true.
+          if (.not. negf%defect_srh%is_active) then
+            negf%tDestroyGn = .true.
+          end if
           if (id0.and.negf%verbose.gt.VBT) call message_clock('Compute Jn,n+1 ')
           call iterative_layer_current(negf, Er, curr_mat)
           negf%curr_mat(iE,:) = negf%curr_mat(iE,:) + curr_mat(:) * negf%kwght
@@ -1361,8 +1363,14 @@ contains
       if (id0.and.negf%verbose.gt.VBT) call message_clock('Compute self-energies ')
       call compute_Sigmas_inelastic(negf)
       if (id0.and.negf%verbose.gt.VBT) call write_clock
-      ! Clear G_r cache after SRH update (preserved only for the update step)
-      if (negf%defect_srh%is_active) call negf%G_r%destroy()
+      ! Clear G_r and G_n caches between SCBA iterations when SRH is active.
+      ! destroy() deallocates the cache tables; they are re-created on demand
+      ! in the next iterative_meir_wingreen call.  Do NOT leave G_n holding
+      ! stale blocks from the previous iteration.
+      if (negf%defect_srh%is_active) then
+        if (associated(negf%G_r)) call negf%G_r%destroy()
+        if (associated(negf%G_n)) call negf%G_n%destroy()
+      end if
 
       ! Integrate energy-resolved currents 
       call electron_current_meir_wingreen(negf)
@@ -1376,9 +1384,11 @@ contains
 
       ! When only defect SRH is active, also require defect rates to converge
       if (negf%defect_srh%is_active) then
-        defect_scba_converged = &
-            & abs(negf%defect_srh%total_recomb_rate - prev_recomb_rate) &
-            & <= negf%scba_inelastic_tol * (abs(prev_recomb_rate) + 1.0e-30_dp)
+        ! Require at least 2 SCBA iterations before accepting convergence
+        ! (iteration 1 would otherwise match prev_recomb_rate = 0 trivially).
+        defect_scba_converged = (scba_iter >= 2) .and. &
+            & (abs(negf%defect_srh%total_recomb_rate - prev_recomb_rate) &
+            & <= negf%scba_inelastic_tol * (abs(prev_recomb_rate) + 1.0e-30_dp))
         prev_recomb_rate = negf%defect_srh%total_recomb_rate
         if (.not. defect_scba_converged) then
           negf%scbaDriverInelastic%converged = .false.
@@ -1729,14 +1739,19 @@ contains
       negf%local_en_points = np + mod(Npoints,numprocs)
     end if
 
-    if ( get_max_wq(negf%interactList) == 0.0_dp) then
+    ! Defect SRH needs the same contiguous local energy layout as inelastic
+    ! SCBA so that G_n/G_r caches can be indexed by pt_cpu.
+    if ( get_max_wq(negf%interactList) == 0.0_dp .and. &
+        & .not. negf%defect_srh%is_active) then
       ! distribute energy grid round robin scheme
       !     0 1 2 3 ... 0 1 2 .... 0 1 2 ....
+      ! Always set pt_cpu (local sequential index on each rank).
       do i = 0, Npoints-1
         negf%en_grid(i+1)%cpu = mod(i,numprocs)
+        negf%en_grid(i+1)%pt_cpu = i/numprocs + 1
       enddo
     else
-      ! With inelastic points must be contigous
+      ! With inelastic / defect-SRH points must be contiguous
       !    0 0 0 0 ... 1 1 1 .... 2 2 2 ....
       allocate(seq(np))
       do k = 1, np
@@ -1746,6 +1761,14 @@ contains
         negf%en_grid(i*np+1:(i+1)*np)%cpu = i
         negf%en_grid(i*np+1:(i+1)*np)%pt_cpu = seq
       end do
+      ! Assign any remainder points to the last rank
+      if (mod(Npoints, numprocs) > 0) then
+        do k = numprocs*np + 1, Npoints
+          negf%en_grid(k)%cpu = numprocs - 1
+          negf%en_grid(k)%pt_cpu = np + (k - numprocs*np)
+        end do
+      end if
+      deallocate(seq)
     end if
 
   end subroutine tunneling_int_def
@@ -1907,9 +1930,9 @@ contains
     call log_allocate(negf%curr_mat,Npoints,ncont)
     call log_allocate(curr_mat, ncont)
 
-    ! Clean up caches of G_r and G_n
-    call negf%G_r%destroy()
-    call negf%G_n%destroy()
+    ! Clean up caches of G_r and G_n (object may exist but MatArray empty)
+    if (associated(negf%G_r)) call negf%G_r%destroy()
+    if (associated(negf%G_n)) call negf%G_n%destroy()
 
     ! Create Fermi array. Set reference such that f(ref)=0.
     ref_bk = negf%refcont
@@ -2033,8 +2056,14 @@ contains
       if (id0.and.negf%verbose.gt.VBT) call message_clock('Compute self-energies ')
       call compute_Sigmas_inelastic(negf)
       if (id0.and.negf%verbose.gt.VBT) call write_clock
-      ! Clear G_r cache after SRH update (preserved only for the update step)
-      if (negf%defect_srh%is_active) call negf%G_r%destroy()
+      ! Clear G_r and G_n caches between SCBA iterations when SRH is active.
+      ! destroy() deallocates the cache tables; they are re-created on demand
+      ! in the next iterative_meir_wingreen call.  Do NOT leave G_n holding
+      ! stale blocks from the previous iteration.
+      if (negf%defect_srh%is_active) then
+        if (associated(negf%G_r)) call negf%G_r%destroy()
+        if (associated(negf%G_n)) call negf%G_n%destroy()
+      end if
 
       call electron_current_meir_wingreen(negf)
 
@@ -2047,9 +2076,11 @@ contains
       call negf%scbaDriverInelastic%check_J_convergence(negf%currents)
       ! When only defect SRH is active, also require defect rates to converge
       if (negf%defect_srh%is_active) then
-        defect_scba_converged = &
-            & abs(negf%defect_srh%total_recomb_rate - prev_recomb_rate) &
-            & <= negf%scba_inelastic_tol * (abs(prev_recomb_rate) + 1.0e-30_dp)
+        ! Require at least 2 SCBA iterations before accepting convergence
+        ! (iteration 1 would otherwise match prev_recomb_rate = 0 trivially).
+        defect_scba_converged = (scba_iter >= 2) .and. &
+            & (abs(negf%defect_srh%total_recomb_rate - prev_recomb_rate) &
+            & <= negf%scba_inelastic_tol * (abs(prev_recomb_rate) + 1.0e-30_dp))
         prev_recomb_rate = negf%defect_srh%total_recomb_rate
         if (.not. defect_scba_converged) then
           negf%scbaDriverInelastic%converged = .false.
@@ -2122,9 +2153,9 @@ contains
     call log_allocate(negf%ldos_mat, Npoints, nbl)
     call log_allocate(ldos_mat, nbl)
 
-    ! Clean up caches of G_r and G_n
-    call negf%G_r%destroy()
-    call negf%G_n%destroy()
+    ! Clean up caches of G_r and G_n (object may exist but MatArray empty)
+    if (associated(negf%G_r)) call negf%G_r%destroy()
+    if (associated(negf%G_n)) call negf%G_n%destroy()
 
     ! Create Fermi array. Set reference such that f(ref)=0.
     ref_bk = negf%refcont
@@ -2210,7 +2241,9 @@ contains
           ! ---------------------------------------------------------------------
           ! Compute layer-to-layer currents and release memory
           ! ---------------------------------------------------------------------
-          negf%tDestroyGn = .true.
+          if (.not. negf%defect_srh%is_active) then
+            negf%tDestroyGn = .true.
+          end if
           if (id0.and.negf%verbose.gt.VBT) call message_clock('Compute Jn,n+1 ')
           call iterative_layer_current(negf, Er, curr_mat, ldos_mat)
           if (id0.and.negf%verbose.gt.VBT) call write_clock
@@ -2231,8 +2264,14 @@ contains
       if (id0.and.negf%verbose.gt.VBT) call message_clock('Compute self-energies ')
       call compute_Sigmas_inelastic(negf)
       if (id0.and.negf%verbose.gt.VBT) call write_clock
-      ! Clear G_r cache after SRH update (preserved only for the update step)
-      if (negf%defect_srh%is_active) call negf%G_r%destroy()
+      ! Clear G_r and G_n caches between SCBA iterations when SRH is active.
+      ! destroy() deallocates the cache tables; they are re-created on demand
+      ! in the next iterative_meir_wingreen call.  Do NOT leave G_n holding
+      ! stale blocks from the previous iteration.
+      if (negf%defect_srh%is_active) then
+        if (associated(negf%G_r)) call negf%G_r%destroy()
+        if (associated(negf%G_n)) call negf%G_n%destroy()
+      end if
 
       call electron_current_meir_wingreen(negf)
 
@@ -2245,9 +2284,11 @@ contains
 
       ! When only defect SRH is active, also require defect rates to converge
       if (negf%defect_srh%is_active) then
-        defect_scba_converged = &
-            & abs(negf%defect_srh%total_recomb_rate - prev_recomb_rate) &
-            & <= negf%scba_inelastic_tol * (abs(prev_recomb_rate) + 1.0e-30_dp)
+        ! Require at least 2 SCBA iterations before accepting convergence
+        ! (iteration 1 would otherwise match prev_recomb_rate = 0 trivially).
+        defect_scba_converged = (scba_iter >= 2) .and. &
+            & (abs(negf%defect_srh%total_recomb_rate - prev_recomb_rate) &
+            & <= negf%scba_inelastic_tol * (abs(prev_recomb_rate) + 1.0e-30_dp))
         prev_recomb_rate = negf%defect_srh%total_recomb_rate
         if (.not. defect_scba_converged) then
           negf%scbaDriverInelastic%converged = .false.
@@ -3429,6 +3470,7 @@ contains
     integer :: pl, orb_local, m_orb, nu
     integer :: pl_start, pl_end, nbl, nk_loc
     integer :: iK
+    real(dp) :: tg_less_val, tg_great_val, a_val
     real(dp), allocatable :: e_grid(:), w_quad(:)
     complex(dp), allocatable :: g_less_diag(:, :)
     complex(dp), allocatable :: g_great_diag(:, :)
@@ -3476,34 +3518,40 @@ contains
           label%row_block = pl
           label%col_block = pl
 
-          ! Retrieve G< block pointer
+          ! Retrieve G< block pointer (cache may be empty on first SCBA pass)
+          if (.not. associated(negf%G_n)) cycle
           if (.not. negf%G_n%is_cached(label)) cycle
           call negf%G_n%retrieve_pointer(pGn, label)
 
           ! Retrieve G_r block pointer (may be null if not cached)
           pGr => null()
           if (associated(negf%G_r)) then
-            call negf%G_r%retrieve_pointer(pGr, label)
+            if (negf%G_r%is_cached(label)) then
+              call negf%G_r%retrieve_pointer(pGr, label)
+            end if
           end if
 
-          ! Extract diagonal entries, weighted by k-point weight
+          ! Extract diagonal entries with correct convention conversion.
+          ! libnegf stores pGn = G^n = G^R Sigma^n G^A with REAL non-negative
+          ! diagonal (tilde_G<). Spectral density A = -2 Im(G^R) >= 0.
+          ! ln_defect_srh expects Keldysh: Im(G<)=+tilde_G<, Im(G>)=-tilde_G>.
           do m_orb = 1, n_orb_pl
             orb_local = pl_start + m_orb - 1
+            tg_less_val = max(0.0_dp, real(pGn%val(m_orb, m_orb), dp))
+            if (associated(pGr)) then
+              a_val = max(0.0_dp, -2.0_dp * aimag(pGr%val(m_orb, m_orb)))
+            else
+              a_val = tg_less_val
+            end if
+            tg_great_val = max(0.0_dp, a_val - tg_less_val)
             g_less_diag(orb_local, iE_global) = &
                 & g_less_diag(orb_local, iE_global) &
-                & + negf%kweights(negf%local_k_index(iK)) * pGn%val(m_orb, m_orb)
-            ! G> = G< + (Gr - Gr†) => Im(G>) = Im(G<) + 2*Im(Gr)
-            if (associated(pGr)) then
-              g_great_diag(orb_local, iE_global) = &
-                  & g_great_diag(orb_local, iE_global) &
-                  & + negf%kweights(negf%local_k_index(iK)) * ( &
-                  & pGn%val(m_orb, m_orb) &
-                  & + 2.0_dp * cmplx(0.0_dp, aimag(pGr%val(m_orb, m_orb)), dp))
-            else
-              g_great_diag(orb_local, iE_global) = &
-                  & g_great_diag(orb_local, iE_global) &
-                  & + negf%kweights(negf%local_k_index(iK)) * pGn%val(m_orb, m_orb)
-            end if
+                & + negf%kweights(negf%local_k_index(iK)) * &
+                & cmplx(0.0_dp, tg_less_val, dp)
+            g_great_diag(orb_local, iE_global) = &
+                & g_great_diag(orb_local, iE_global) &
+                & + negf%kweights(negf%local_k_index(iK)) * &
+                & cmplx(0.0_dp, -tg_great_val, dp)
           end do
 
         end do ! pl
