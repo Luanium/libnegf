@@ -36,6 +36,7 @@ set(test-directories
     f90defect_scba
     f90defect_hetero
     f90bulk_srh_rate
+    f90pin_defect_current
     c_int_defect_srh
 )
 

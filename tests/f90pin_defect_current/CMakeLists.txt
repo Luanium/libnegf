@@ -1,0 +1,1 @@
+setup_test(f90pin_defect_current pin_defect_current.F90 LABELS validation)
