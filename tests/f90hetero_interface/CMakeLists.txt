@@ -1,0 +1,1 @@
+setup_test(f90hetero_interface hetero_interface.F90 LABELS validation)
